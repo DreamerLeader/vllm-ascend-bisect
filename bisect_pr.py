@@ -69,15 +69,20 @@ class BisectResult:
 
 def run_git(repo_dir: str, *args: str) -> str:
     cmd = ["git", "-C", repo_dir] + list(args)
+    log.debug("[git] %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
+        log.error("[git] command failed (rc=%d): %s", result.returncode, " ".join(cmd))
+        log.error("[git] stderr: %s", result.stderr.strip())
         raise RuntimeError(f"git failed: {' '.join(cmd)}\n{result.stderr.strip()}")
     return result.stdout.strip()
 
 
 def resolve_ref(repo_dir: str, ref: str) -> str:
     """Resolve a ref (branch/tag/sha) to full SHA."""
-    return run_git(repo_dir, "rev-parse", ref)
+    sha = run_git(repo_dir, "rev-parse", ref)
+    log.info("[git] Resolved ref '%s' → %s", ref, sha[:10])
+    return sha
 
 
 def get_commits_between(repo_dir: str, good: str, bad: str) -> list[CommitInfo]:
@@ -86,6 +91,7 @@ def get_commits_between(repo_dir: str, good: str, bad: str) -> list[CommitInfo]:
     按时间正序排列（最早的在前）。
     first-parent 保证每个 commit 对应一个合入的 PR（无论 squash merge 还是 merge commit）。
     """
+    log.info("[git] Fetching commits between %s..%s (first-parent)", good, bad)
     log_output = run_git(
         repo_dir,
         "log", "--first-parent", "--reverse",
@@ -93,12 +99,14 @@ def get_commits_between(repo_dir: str, good: str, bad: str) -> list[CommitInfo]:
         f"{good}..{bad}",
     )
     if not log_output:
+        log.warning("[git] No commits found between %s..%s", good, bad)
         return []
 
     commits = []
     for line in log_output.splitlines():
         parts = line.split("|", 3)
         if len(parts) < 4:
+            log.debug("[git] Skipping malformed log line: %s", line[:80])
             continue
         sha, subject, author, date = parts
 
@@ -109,6 +117,11 @@ def get_commits_between(repo_dir: str, good: str, bad: str) -> list[CommitInfo]:
             sha=sha, subject=subject,
             pr_number=pr_number, author=author, date=date,
         ))
+
+    log.info("[git] Found %d commits, date range: %s ~ %s",
+             len(commits),
+             commits[0].date[:10] if commits else "?",
+             commits[-1].date[:10] if commits else "?")
     return commits
 
 
@@ -123,8 +136,10 @@ def _extract_pr_number(subject: str) -> Optional[int]:
 
 
 def checkout_commit(repo_dir: str, sha: str) -> None:
+    log.info("[git] Checkout commit %s", sha[:10])
     run_git(repo_dir, "checkout", "--force", sha)
     run_git(repo_dir, "clean", "-fd", "--exclude=.venv", "--exclude=venv")
+    log.debug("[git] Checkout complete, working tree cleaned")
 
 
 def save_current_ref(repo_dir: str) -> str:
@@ -156,16 +171,24 @@ def run_command(
     use_shell = isinstance(cmd, str)
     log.info("  [%s] %s", label, cmd if use_shell else " ".join(cmd))
 
+    cmd_start = time.time()
     try:
         result = subprocess.run(
             cmd, shell=use_shell, cwd=cwd, env=run_env,
             capture_output=True, text=True, timeout=timeout,
         )
         output = (result.stdout or "") + (result.stderr or "")
+        elapsed = time.time() - cmd_start
+        log.info("  [%s] finished in %.1fs, exit code: %d", label, elapsed, result.returncode)
+        if result.returncode != 0:
+            log.debug("  [%s] stderr tail: %s", label, (result.stderr or "")[-500:])
         return result.returncode, output
     except subprocess.TimeoutExpired:
+        elapsed = time.time() - cmd_start
+        log.error("  [%s] TIMEOUT after %.1fs (limit: %ds)", label, elapsed, timeout)
         return -1, f"[TIMEOUT: exceeded {timeout}s]"
     except Exception as e:
+        log.error("  [%s] execution error: %s", label, e)
         return -2, f"[EXECUTION ERROR: {e}]"
 
 
@@ -188,21 +211,28 @@ def run_test_at_commit(
     """
     env = {"BISECT_REPO_DIR": repo_dir, "BISECT_COMMIT": sha}
 
+    log.info("[test] Testing commit %s", sha[:10])
+
     # checkout
     checkout_commit(repo_dir, sha)
 
     # setup (if provided)
     if setup_cmd:
+        log.info("[test] Running setup for commit %s ...", sha[:10])
         rc, output = run_command(setup_cmd, cwd=repo_dir, timeout=timeout, env=env, label="setup")
         if rc != 0:
-            log.warning("  Setup failed (rc=%d), SKIP this commit", rc)
+            log.warning("[test] Setup failed (rc=%d) for commit %s, marking as SKIP", rc, sha[:10])
+            log.warning("[test] Setup error output: %s", output[-300:])
             _save_log(log_dir, sha, "setup_fail", output)
             return "skip", output
+        log.info("[test] Setup succeeded for commit %s", sha[:10])
 
     # run test
+    log.info("[test] Running test for commit %s ...", sha[:10])
     rc, output = run_command(test_cmd, cwd=repo_dir, timeout=timeout, env=env, label="test")
     result = "pass" if rc == 0 else "fail"
 
+    log.info("[test] Commit %s result: %s", sha[:10], result.upper())
     _save_log(log_dir, sha, result, output)
     return result, output
 
@@ -214,6 +244,7 @@ def _save_log(log_dir: str | None, sha: str, result: str, output: str):
     path = os.path.join(log_dir, f"{sha[:10]}_{result}.log")
     with open(path, "w") as f:
         f.write(output)
+    log.debug("[log] Saved test log to %s (%d bytes)", path, len(output))
 
 
 # ── Core bisect ──────────────────────────────────────────────────────────────
@@ -240,13 +271,19 @@ def bisect(
     """
     start_time = time.time()
     original_ref = save_current_ref(repo_dir)
+    log.info("[bisect] Saved original ref: %s", original_ref)
+    log.info("[bisect] Good: %s, Bad: %s", good, bad)
+    log.info("[bisect] Timeout per step: %ds", timeout)
+    if log_dir:
+        log.info("[bisect] Logs will be saved to: %s", log_dir)
 
     commits = get_commits_between(repo_dir, good, bad)
     if not commits:
+        log.warning("[bisect] No commits found between good..bad, nothing to bisect")
         return BisectResult(status="no_regression", total_commits=0)
 
     n = len(commits)
-    log.info("Found %d commits between good..bad, need ~%d steps", n, n.bit_length())
+    log.info("[bisect] Found %d commits, need ~%d steps to bisect", n, n.bit_length())
 
     history = []
     lo, hi = 0, n - 1
@@ -258,10 +295,12 @@ def bisect(
             commit = commits[mid]
             step += 1
 
-            log.info(
-                "── Step %d: [%d..%d] testing index %d ── %s  %s",
-                step, lo, hi, mid, commit.sha[:10], commit.subject[:60],
-            )
+            log.info("")
+            log.info("── Step %d/%d: [%d..%d] testing index %d ── %s  %s",
+                     step, n.bit_length(), lo, hi, mid, commit.sha[:10], commit.subject[:60])
+            if commit.pr_number:
+                log.info("   PR #%d | Author: %s | Date: %s",
+                         commit.pr_number, commit.author, commit.date[:10])
 
             result, output = run_test_at_commit(
                 repo_dir, commit.sha, test_cmd, setup_cmd, timeout, log_dir,
@@ -323,9 +362,11 @@ def bisect(
 
     finally:
         try:
+            log.info("[bisect] Restoring original ref: %s", original_ref)
             run_git(repo_dir, "checkout", "--force", original_ref)
-        except RuntimeError:
-            pass
+            log.info("[bisect] Restored to %s", original_ref)
+        except RuntimeError as e:
+            log.warning("[bisect] Failed to restore to %s: %s", original_ref, e)
 
 
 def _resolve_skip(
@@ -420,8 +461,10 @@ def main():
             sys.exit(1)
         os.chmod(test_script, 0o755)
         test_cmd = test_script
+        log.info("[config] Test script: %s", test_script)
     else:
         test_cmd = args.cmd
+        log.info("[config] Test command: %s", test_cmd)
 
     # 解析 setup 命令
     setup_cmd = None
@@ -431,8 +474,12 @@ def main():
             log.error("安装脚本不存在: %s", setup_cmd)
             sys.exit(1)
         os.chmod(setup_cmd, 0o755)
+        log.info("[config] Setup script: %s", setup_cmd)
     elif args.setup_cmd:
         setup_cmd = args.setup_cmd
+        log.info("[config] Setup command: %s", setup_cmd)
+    else:
+        log.info("[config] No setup command configured")
 
     repo_dir = os.path.abspath(args.repo_dir)
     if not os.path.isdir(repo_dir):
@@ -440,6 +487,9 @@ def main():
         sys.exit(1)
 
     log_dir = os.path.abspath(args.log_dir)
+    log.info("[config] Repo: %s", repo_dir)
+    log.info("[config] Good: %s, Bad: %s", args.good, args.bad)
+    log.info("[config] Timeout: %ds, Log dir: %s", args.timeout, log_dir)
 
     # fetch latest
     log.info("Fetching latest commits ...")
@@ -503,6 +553,7 @@ def main():
 
     with open(args.output, "w") as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False)
+    log.info("[result] Bisect result saved to %s", args.output)
 
     # 输出结果
     if bisect_result.status == "found":

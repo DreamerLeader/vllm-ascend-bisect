@@ -85,6 +85,7 @@ class SceneConfig:
 
 def load_config(path: str) -> SceneConfig:
     """从 YAML 文件加载场景配置"""
+    log.info("[config] Loading scene config from: %s", path)
     with open(path) as f:
         raw = yaml.safe_load(f)
 
@@ -113,7 +114,7 @@ def load_config(path: str) -> SceneConfig:
             check=b.get("check"),
         ))
 
-    return SceneConfig(
+    config = SceneConfig(
         name=raw.get("name", "unnamed"),
         description=raw.get("description", ""),
         setup_cmd=raw.get("setup_cmd", ""),
@@ -121,6 +122,14 @@ def load_config(path: str) -> SceneConfig:
         benchmarks=benchmarks,
         cleanup_cmd=raw.get("cleanup_cmd", ""),
     )
+    log.info("[config] Scene: %s (%s)", config.name, config.description or "no description")
+    log.info("[config] Setup: %s", config.setup_cmd or "(none)")
+    log.info("[config] Server: %s", "configured" if config.server else "(none)")
+    log.info("[config] Benchmarks: %d task(s) — %s",
+             len(config.benchmarks),
+             ", ".join(b.name for b in config.benchmarks))
+    log.info("[config] Cleanup: %s", config.cleanup_cmd or "(none)")
+    return config
 
 
 # ── 服务管理 ─────────────────────────────────────────────────────────────────
@@ -140,11 +149,16 @@ class VllmServer:
 
     def start(self) -> bool:
         """启动 vLLM 服务, 返回是否成功"""
-        log.info("[server] Starting: %s", self.config.start_cmd)
+        log.info("[server] Starting vLLM service ...")
+        log.info("[server] Command: %s", self.config.start_cmd)
+        log.info("[server] Endpoint: %s, health: %s", self.base_url, self.config.health_endpoint)
+        log.info("[server] Ready timeout: %ds, check interval: %ds",
+                 self.config.ready_timeout, self.config.ready_interval)
 
         env = os.environ.copy()
         if self.config.env:
             env.update({k: str(v) for k, v in self.config.env.items()})
+            log.info("[server] Extra env: %s", ", ".join(f"{k}={v}" for k, v in self.config.env.items()))
 
         try:
             self.process = subprocess.Popen(
@@ -167,13 +181,19 @@ class VllmServer:
         """轮询健康检查, 等待服务就绪"""
         url = f"{self.base_url}{self.config.health_endpoint}"
         deadline = time.time() + self.config.ready_timeout
+        attempt = 0
+        start_time = time.time()
+
+        log.info("[server] Health check URL: %s", url)
 
         while time.time() < deadline:
+            attempt += 1
             # 检查进程是否已退出
             if self.process.poll() is not None:
                 stdout = self.process.stdout.read().decode(errors="replace") if self.process.stdout else ""
-                log.error("[server] Process exited prematurely (rc=%d)", self.process.returncode)
-                log.error("[server] Output: %s", stdout[-2000:])
+                log.error("[server] Process exited prematurely (rc=%d) after %.1fs",
+                          self.process.returncode, time.time() - start_time)
+                log.error("[server] Output tail:\n%s", stdout[-2000:])
                 return False
 
             try:
@@ -182,36 +202,51 @@ class VllmServer:
                     capture_output=True, text=True, timeout=10,
                 )
                 if result.returncode == 0:
-                    log.info("[server] Ready (health check passed)")
+                    elapsed = time.time() - start_time
+                    log.info("[server] Ready! Health check passed after %d attempts (%.1fs)", attempt, elapsed)
                     return True
             except (subprocess.TimeoutExpired, Exception):
                 pass
 
+            remaining = deadline - time.time()
+            if attempt % 6 == 0:  # 每 30 秒左右打印一次等待状态
+                log.info("[server] Still waiting for ready ... (attempt %d, %.0fs remaining)", attempt, remaining)
+
             time.sleep(self.config.ready_interval)
 
-        log.error("[server] Not ready after %ds", self.config.ready_timeout)
+        log.error("[server] Not ready after %ds (%d attempts)", self.config.ready_timeout, attempt)
         return False
 
     def stop(self):
         """停止 vLLM 服务"""
+        log.info("[server] Stopping vLLM service ...")
         if self.config.stop_cmd:
-            log.info("[server] Running stop command: %s", self.config.stop_cmd)
-            subprocess.run(
+            log.info("[server] Running custom stop command: %s", self.config.stop_cmd)
+            result = subprocess.run(
                 self.config.stop_cmd, shell=True, cwd=self.cwd,
-                capture_output=True, timeout=30,
+                capture_output=True, text=True, timeout=30,
             )
+            if result.returncode != 0:
+                log.warning("[server] Stop command exited with code %d: %s",
+                            result.returncode, result.stderr[:200])
 
         if self.process and self.process.poll() is None:
-            log.info("[server] Killing process group (PID=%d)", self.process.pid)
+            log.info("[server] Sending SIGTERM to process group (PID=%d)", self.process.pid)
             try:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
                 self.process.wait(timeout=15)
+                log.info("[server] Process terminated gracefully")
             except (ProcessLookupError, subprocess.TimeoutExpired):
+                log.warning("[server] SIGTERM timeout, sending SIGKILL ...")
                 try:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                    log.info("[server] Process killed with SIGKILL")
                 except ProcessLookupError:
-                    pass
-            log.info("[server] Stopped")
+                    log.info("[server] Process already exited")
+        elif self.process:
+            log.info("[server] Process already exited (rc=%d)", self.process.returncode)
+        else:
+            log.debug("[server] No process to stop")
 
     def get_output(self) -> str:
         """获取服务的 stdout/stderr 输出"""
@@ -240,16 +275,25 @@ def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
         "check_detail": "...", # 校验详情
     }
     """
-    log.info("[bench] Running: %s", bench.name)
+    log.info("[bench] ─── Running benchmark: %s ───", bench.name)
     log.info("[bench] Command: %s", bench.cmd)
+    log.info("[bench] Timeout: %ds, result_file: %s, check rules: %s",
+             bench.timeout,
+             bench.result_file or "(none)",
+             ", ".join(f"{k} {v}" for k, v in bench.check.items()) if bench.check else "(exit code)")
 
+    bench_start = time.time()
     try:
         proc = subprocess.run(
             bench.cmd, shell=True, cwd=cwd, env=env,
             capture_output=True, text=True, timeout=bench.timeout,
         )
         output = proc.stdout + "\n" + proc.stderr
+        bench_elapsed = time.time() - bench_start
+        log.info("[bench] %s finished in %.1fs, exit code: %d", bench.name, bench_elapsed, proc.returncode)
     except subprocess.TimeoutExpired:
+        bench_elapsed = time.time() - bench_start
+        log.error("[bench] %s TIMEOUT after %.1fs (limit: %ds)", bench.name, bench_elapsed, bench.timeout)
         return {
             "name": bench.name, "passed": False,
             "result": None, "output": f"[TIMEOUT: {bench.timeout}s]",
@@ -258,8 +302,10 @@ def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
 
     if proc.returncode != 0:
         log.warning("[bench] %s exited with code %d", bench.name, proc.returncode)
+        log.debug("[bench] stderr tail: %s", proc.stderr[-500:] if proc.stderr else "")
         # 命令本身失败, 但不一定直接判 fail, 看有没有 check 规则
         if not bench.check:
+            log.info("[bench] %s: FAIL (no check rules, using exit code)", bench.name)
             return {
                 "name": bench.name, "passed": False,
                 "result": None, "output": output[-3000:],
@@ -267,7 +313,12 @@ def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
             }
 
     # 提取结果数据
+    log.info("[bench] Extracting result data ...")
     result_data = _extract_result(bench, cwd, output)
+    if result_data:
+        log.info("[bench] Result data extracted: %s", json.dumps(result_data, ensure_ascii=False)[:500])
+    else:
+        log.warning("[bench] No result data extracted")
 
     # 校验
     if bench.check and result_data:
@@ -291,28 +342,42 @@ def _extract_result(bench: BenchConfig, cwd: str, output: str) -> Optional[dict]
     """从结果文件或命令提取结构化结果"""
     # 方式1: 从结果文件读取
     if bench.result_file:
-        result_path = os.path.join(cwd, bench.result_file)
+        result_path = bench.result_file if os.path.isabs(bench.result_file) else os.path.join(cwd, bench.result_file)
+        log.debug("[bench] Trying result file: %s", result_path)
         if os.path.isfile(result_path):
             try:
                 with open(result_path) as f:
-                    return json.load(f)
+                    data = json.load(f)
+                log.info("[bench] Result extracted from file: %s", result_path)
+                return data
             except (json.JSONDecodeError, IOError) as e:
                 log.warning("[bench] Cannot parse result file %s: %s", result_path, e)
+        else:
+            log.warning("[bench] Result file not found: %s", result_path)
 
     # 方式2: 运行提取命令
     if bench.result_cmd:
+        log.debug("[bench] Trying result_cmd: %s", bench.result_cmd)
         try:
             proc = subprocess.run(
                 bench.result_cmd, shell=True, cwd=cwd,
                 capture_output=True, text=True, timeout=30,
             )
             if proc.returncode == 0 and proc.stdout.strip():
-                return json.loads(proc.stdout.strip())
+                data = json.loads(proc.stdout.strip())
+                log.info("[bench] Result extracted from result_cmd")
+                return data
         except (json.JSONDecodeError, subprocess.TimeoutExpired) as e:
             log.warning("[bench] result_cmd failed: %s", e)
 
     # 方式3: 尝试从 stdout 末尾提取 JSON
-    return _try_parse_json_from_output(output)
+    log.debug("[bench] Trying to parse JSON from command output ...")
+    data = _try_parse_json_from_output(output)
+    if data:
+        log.info("[bench] Result extracted from command output (auto-detect)")
+    else:
+        log.debug("[bench] No JSON found in command output")
+    return data
 
 
 def _try_parse_json_from_output(output: str) -> Optional[dict]:
@@ -353,11 +418,13 @@ def check_result(result: dict, rules: dict) -> tuple[bool, str]:
     details = []
     all_passed = True
 
+    log.info("[check] Checking %d rule(s) ...", len(rules))
     for field, condition in rules.items():
         actual = _get_nested(result, field)
         if actual is None:
             details.append(f"{field}: MISSING in result")
             all_passed = False
+            log.warning("[check] %s: field MISSING in result data", field)
             continue
 
         passed, msg = _eval_condition(actual, condition)
@@ -365,6 +432,9 @@ def check_result(result: dict, rules: dict) -> tuple[bool, str]:
         details.append(f"{field}: {actual} {condition} -> {status}")
         if not passed:
             all_passed = False
+            log.warning("[check] FAIL: %s = %s (expected %s)", field, actual, condition)
+        else:
+            log.info("[check] OK: %s = %s %s", field, actual, condition)
 
     detail_str = "; ".join(details)
     return all_passed, detail_str
@@ -441,37 +511,52 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
     server = None
     results = []
 
+    scene_start = time.time()
+
     try:
         # ── Step 1: Setup ──
         if config.setup_cmd:
-            log.info("[setup] %s", config.setup_cmd)
+            log.info("[step 1/4] Running setup ...")
+            log.info("[setup] Command: %s", config.setup_cmd)
+            setup_start = time.time()
             proc = subprocess.run(
                 config.setup_cmd, shell=True, cwd=repo_dir, env=env,
                 capture_output=True, text=True, timeout=600,
             )
+            setup_elapsed = time.time() - setup_start
             if proc.returncode != 0:
-                msg = f"Setup failed (rc={proc.returncode}): {proc.stderr[-1000:]}"
-                log.error(msg)
+                msg = f"Setup failed (rc={proc.returncode}) after {setup_elapsed:.1f}s"
+                log.error("[setup] %s", msg)
+                log.error("[setup] stderr: %s", proc.stderr[-1000:])
                 return False, msg
+            log.info("[setup] Completed in %.1fs", setup_elapsed)
+        else:
+            log.info("[step 1/4] No setup command, skipping")
 
         # ── Step 2: Start server ──
         if config.server:
+            log.info("[step 2/4] Starting vLLM server ...")
             server = VllmServer(config.server, cwd=repo_dir)
             if not server.start():
                 msg = "vLLM server failed to start"
-                log.error(msg)
+                log.error("[server] %s", msg)
                 return False, msg
 
             # 把 server 地址写入环境变量, benchmark 脚本可以用
             env["VLLM_BASE_URL"] = server.base_url
             env["VLLM_HOST"] = config.server.host
             env["VLLM_PORT"] = str(config.server.port)
+            log.info("[server] Environment set: VLLM_BASE_URL=%s", server.base_url)
+        else:
+            log.info("[step 2/4] No server configured, skipping")
 
         # ── Step 3: Run benchmarks ──
+        log.info("[step 3/4] Running %d benchmark(s) ...", len(config.benchmarks))
         all_passed = True
         detail_lines = []
 
-        for bench in config.benchmarks:
+        for i, bench in enumerate(config.benchmarks, 1):
+            log.info("[bench] (%d/%d) Starting: %s", i, len(config.benchmarks), bench.name)
             result = run_benchmark(bench, cwd=repo_dir, env=env)
             results.append(result)
 
@@ -481,25 +566,38 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
             else:
                 detail_lines.append(f"[PASS] {bench.name}: {result['check_detail']}")
 
+        scene_elapsed = time.time() - scene_start
         detail = "\n".join(detail_lines)
-        log.info("\n--- Results ---\n%s\n", detail)
+        log.info("")
+        log.info("─── Scene Results (%.1fs) ───", scene_elapsed)
+        for line in detail_lines:
+            log.info("  %s", line)
+        log.info("─── Overall: %s ───", "PASS" if all_passed else "FAIL")
         return all_passed, detail
 
     except Exception as e:
-        log.error("Scene execution error: %s", e, exc_info=True)
+        log.error("[scene] Execution error after %.1fs: %s",
+                  time.time() - scene_start, e, exc_info=True)
         return False, str(e)
 
     finally:
         # ── Step 4: Cleanup ──
+        log.info("[step 4/4] Cleanup ...")
         if server:
             server.stop()
 
         if config.cleanup_cmd:
-            log.info("[cleanup] %s", config.cleanup_cmd)
-            subprocess.run(
+            log.info("[cleanup] Running: %s", config.cleanup_cmd)
+            cleanup_result = subprocess.run(
                 config.cleanup_cmd, shell=True, cwd=repo_dir,
-                capture_output=True, timeout=60,
+                capture_output=True, text=True, timeout=60,
             )
+            if cleanup_result.returncode != 0:
+                log.warning("[cleanup] Command exited with code %d", cleanup_result.returncode)
+            else:
+                log.info("[cleanup] Done")
+        else:
+            log.info("[cleanup] No cleanup command configured")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

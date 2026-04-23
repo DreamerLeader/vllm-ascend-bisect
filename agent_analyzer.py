@@ -29,6 +29,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -62,6 +63,7 @@ def fetch_pr_info(github_repo: str, pr_number: int) -> PRInfo:
     log.info("Fetching PR #%d info from %s ...", pr_number, github_repo)
 
     # Get PR metadata
+    log.info("[github] Fetching PR metadata ...")
     pr_json = subprocess.run(
         [
             "gh", "api",
@@ -71,11 +73,14 @@ def fetch_pr_info(github_repo: str, pr_number: int) -> PRInfo:
         capture_output=True, text=True, timeout=30,
     )
     if pr_json.returncode != 0:
+        log.error("[github] Failed to fetch PR metadata: %s", pr_json.stderr)
         raise RuntimeError(f"Failed to fetch PR info: {pr_json.stderr}")
 
     pr_data = json.loads(pr_json.stdout)
+    log.info("[github] PR title: %s, author: %s", pr_data.get("title", "?"), pr_data.get("user", "?"))
 
     # Get PR diff
+    log.info("[github] Fetching PR diff ...")
     diff_result = subprocess.run(
         [
             "gh", "api",
@@ -85,8 +90,10 @@ def fetch_pr_info(github_repo: str, pr_number: int) -> PRInfo:
         capture_output=True, text=True, timeout=60,
     )
     diff = diff_result.stdout if diff_result.returncode == 0 else "[diff fetch failed]"
+    log.info("[github] Diff size: %d bytes", len(diff))
 
     # Get changed files
+    log.info("[github] Fetching changed files ...")
     files_result = subprocess.run(
         [
             "gh", "api",
@@ -96,8 +103,10 @@ def fetch_pr_info(github_repo: str, pr_number: int) -> PRInfo:
         capture_output=True, text=True, timeout=30,
     )
     changed_files = files_result.stdout.strip().splitlines() if files_result.returncode == 0 else []
+    log.info("[github] Changed files: %d", len(changed_files))
 
     # Get review comments
+    log.info("[github] Fetching review comments ...")
     comments_result = subprocess.run(
         [
             "gh", "api",
@@ -107,6 +116,7 @@ def fetch_pr_info(github_repo: str, pr_number: int) -> PRInfo:
         capture_output=True, text=True, timeout=30,
     )
     comments = comments_result.stdout.strip().splitlines() if comments_result.returncode == 0 else []
+    log.info("[github] Review comments: %d", len(comments))
 
     return PRInfo(
         number=pr_number,
@@ -149,11 +159,15 @@ def analyze_with_claude(
     # Truncate diff if too large
     diff_text = pr_info.diff
     if len(diff_text) > 50000:
+        log.warning("[analyze] Diff too large (%d bytes), truncating to 50000", len(diff_text))
         diff_text = diff_text[:50000] + "\n\n... [diff truncated, too large] ..."
 
     # Truncate test log if too large
     if len(test_log) > 20000:
+        log.warning("[analyze] Test log too large (%d bytes), truncating to last 20000", len(test_log))
         test_log = "... [log truncated] ...\n" + test_log[-20000:]
+
+    log.info("[analyze] Constructing prompt: diff=%d bytes, test_log=%d bytes", len(diff_text), len(test_log))
 
     prompt = f"""You are an expert in vLLM (a high-throughput LLM serving engine) and Ascend NPU hardware.
 
@@ -197,14 +211,20 @@ Please provide a structured analysis:
 Be specific — reference file names, function names, and line numbers from the diff.
 """
 
-    log.info("Calling Claude API for analysis (model: %s) ...", model)
+    log.info("[analyze] Calling Claude API (model: %s) ...", model)
+    api_start = time.time()
     response = client.messages.create(
         model=model,
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
+    api_elapsed = time.time() - api_start
+    result_text = response.content[0].text
+    log.info("[analyze] Claude API responded in %.1fs, output: %d chars", api_elapsed, len(result_text))
+    log.info("[analyze] Token usage: input=%d, output=%d",
+             response.usage.input_tokens, response.usage.output_tokens)
 
-    return response.content[0].text
+    return result_text
 
 
 # ── Report generation ────────────────────────────────────────────────────────
@@ -298,6 +318,7 @@ def run_batch(config_file: str):
         ]
     }
     """
+    log.info("[batch] Loading config from: %s", config_file)
     with open(config_file) as f:
         config = json.load(f)
 
@@ -308,12 +329,17 @@ def run_batch(config_file: str):
     good = config["good"]
     bad = config["bad"]
 
+    log.info("[batch] Repo: %s, good: %s, bad: %s", repo_dir, good, bad)
+    log.info("[batch] Total scenarios: %d", len(config["scenarios"]))
+
     results = []
 
-    for scenario in config["scenarios"]:
+    for idx, scenario in enumerate(config["scenarios"], 1):
         name = scenario["name"]
+        log.info("")
         log.info("=" * 60)
-        log.info("Running scenario: %s", name)
+        log.info("[batch] Scenario %d/%d: %s", idx, len(config["scenarios"]), name)
+        log.info("[batch] Description: %s", scenario.get("description", ""))
         log.info("=" * 60)
 
         test_cmd = scenario.get("cmd")
@@ -418,22 +444,28 @@ def main():
     args = parser.parse_args()
 
     if args.command == "analyze":
+        log.info("[cli] Starting single PR analysis ...")
+
         # Determine PR number
         pr_number = args.pr_number
         bisect_data = None
         github_repo = args.github_repo
 
         if args.bisect_result:
+            log.info("[cli] Loading bisect result from: %s", args.bisect_result)
             with open(args.bisect_result) as f:
                 bisect_data = json.load(f)
             if not pr_number and bisect_data.get("bad_commit", {}).get("pr_number"):
                 pr_number = bisect_data["bad_commit"]["pr_number"]
+                log.info("[cli] PR number from bisect result: #%d", pr_number)
             if bisect_data.get("github_repo"):
                 github_repo = bisect_data["github_repo"]
 
         if not pr_number:
-            log.error("No PR number provided. Use --pr-number or --bisect-result")
+            log.error("[cli] No PR number provided. Use --pr-number or --bisect-result")
             sys.exit(1)
+
+        log.info("[cli] Analyzing PR #%d from %s", pr_number, github_repo)
 
         # Fetch PR info
         pr_info = fetch_pr_info(github_repo, pr_number)
@@ -441,13 +473,17 @@ def main():
         # Read test log
         test_log = ""
         if args.test_log:
+            log.info("[cli] Reading test log from: %s", args.test_log)
             with open(args.test_log) as f:
                 test_log = f.read()
+            log.info("[cli] Test log size: %d bytes", len(test_log))
         elif bisect_data and bisect_data.get("history"):
+            log.info("[cli] Extracting test log from bisect history ...")
             for h in reversed(bisect_data["history"]):
                 if h["result"] == "fail":
                     test_log = h.get("output_tail", "")
                     break
+            log.info("[cli] Test log extracted: %d bytes", len(test_log))
 
         # Analyze
         analysis = analyze_with_claude(
@@ -467,10 +503,11 @@ def main():
 
         with open(args.output, "w") as f:
             f.write(report)
-        log.info("Report saved to %s", args.output)
+        log.info("[cli] Report saved to %s (%d bytes)", args.output, len(report))
         print(f"\nReport generated: {args.output}")
 
     elif args.command == "batch":
+        log.info("[cli] Starting batch mode ...")
         run_batch(args.config)
 
     else:
