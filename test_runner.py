@@ -51,13 +51,15 @@ log = logging.getLogger(__name__)
 @dataclass
 class ServerConfig:
     """vLLM 服务配置"""
-    start_cmd: str              # 启动命令, 如 "python -m vllm.entrypoints.openai.api_server ..."
+    start_cmd: str = ""             # 启动命令, 如 "python -m vllm.entrypoints.openai.api_server ..."
+    start_script: str = ""          # 启动脚本文件路径, 如 "./start_vllm.sh" (与 start_cmd 二选一)
     host: str = "127.0.0.1"
     port: int = 8000
     health_endpoint: str = "/health"          # 健康检查路径
     ready_timeout: int = 300                  # 等待服务就绪的超时(秒)
     ready_interval: int = 5                   # 健康检查间隔(秒)
     stop_cmd: str = ""                        # 自定义停止命令(可选, 默认 kill 进程)
+    stop_script: str = ""                     # 自定义停止脚本(可选)
     env: dict = None                          # 额外环境变量
 
 
@@ -65,7 +67,8 @@ class ServerConfig:
 class BenchConfig:
     """aisbench 验证配置"""
     name: str                                 # 验证名称
-    cmd: str                                  # 运行命令
+    cmd: str = ""                             # 运行命令 (与 script 二选一)
+    script: str = ""                          # 运行脚本文件路径 (与 cmd 二选一)
     timeout: int = 600                        # 超时(秒)
     result_file: str = ""                     # 结果文件路径 (JSON)
     result_cmd: str = ""                      # 提取结果的命令 (stdout 为 JSON)
@@ -77,10 +80,12 @@ class SceneConfig:
     """完整场景配置"""
     name: str
     description: str = ""
-    setup_cmd: str = ""                       # 安装命令
+    setup_cmd: str = ""                       # 安装命令 (与 setup_script 二选一)
+    setup_script: str = ""                    # 安装脚本文件 (与 setup_cmd 二选一)
     server: ServerConfig = None               # vLLM 服务 (可选, 不需要服务的场景可不填)
     benchmarks: list = None                   # 验证列表
     cleanup_cmd: str = ""                     # 清理命令
+    cleanup_script: str = ""                  # 清理脚本文件
 
 
 def load_config(path: str) -> SceneConfig:
@@ -92,22 +97,29 @@ def load_config(path: str) -> SceneConfig:
     server = None
     if raw.get("server"):
         s = raw["server"]
+        if not s.get("start_cmd") and not s.get("start_script"):
+            raise ValueError("server 配置必须提供 start_cmd 或 start_script")
         server = ServerConfig(
-            start_cmd=s["start_cmd"],
+            start_cmd=s.get("start_cmd", ""),
+            start_script=s.get("start_script", ""),
             host=s.get("host", "127.0.0.1"),
             port=s.get("port", 8000),
             health_endpoint=s.get("health_endpoint", "/health"),
             ready_timeout=s.get("ready_timeout", 300),
             ready_interval=s.get("ready_interval", 5),
             stop_cmd=s.get("stop_cmd", ""),
+            stop_script=s.get("stop_script", ""),
             env=s.get("env"),
         )
 
     benchmarks = []
     for b in raw.get("benchmarks", []):
+        if not b.get("cmd") and not b.get("script"):
+            raise ValueError(f"benchmark '{b.get('name', '?')}' 必须提供 cmd 或 script")
         benchmarks.append(BenchConfig(
             name=b["name"],
-            cmd=b["cmd"],
+            cmd=b.get("cmd", ""),
+            script=b.get("script", ""),
             timeout=b.get("timeout", 600),
             result_file=b.get("result_file", ""),
             result_cmd=b.get("result_cmd", ""),
@@ -118,9 +130,11 @@ def load_config(path: str) -> SceneConfig:
         name=raw.get("name", "unnamed"),
         description=raw.get("description", ""),
         setup_cmd=raw.get("setup_cmd", ""),
+        setup_script=raw.get("setup_script", ""),
         server=server,
         benchmarks=benchmarks,
         cleanup_cmd=raw.get("cleanup_cmd", ""),
+        cleanup_script=raw.get("cleanup_script", ""),
     )
     log.info("[config] Scene: %s (%s)", config.name, config.description or "no description")
     log.info("[config] Setup: %s", config.setup_cmd or "(none)")
@@ -147,13 +161,62 @@ class VllmServer:
     def base_url(self) -> str:
         return f"http://{self.config.host}:{self.config.port}"
 
+    def _resolve_start_cmd(self) -> tuple[str | list[str], bool]:
+        """
+        解析启动方式, 返回 (cmd, use_shell).
+        - start_script: 脚本文件路径, 自动处理权限和绝对路径
+        - start_cmd: shell 命令字符串
+        """
+        if self.config.start_script:
+            script = self.config.start_script
+            # 相对路径基于 cwd 解析
+            if not os.path.isabs(script):
+                script = os.path.join(self.cwd, script)
+            script = os.path.abspath(script)
+
+            if not os.path.isfile(script):
+                raise FileNotFoundError(f"启动脚本不存在: {script}")
+
+            os.chmod(script, 0o755)
+            log.info("[server] Using start script: %s", script)
+            # 用 bash 显式执行, 避免 shebang 问题
+            return f"bash {script}", True
+
+        log.info("[server] Using start command: %s", self.config.start_cmd)
+        return self.config.start_cmd, True
+
+    def _resolve_stop_cmd(self) -> Optional[str]:
+        """解析停止命令/脚本"""
+        if self.config.stop_script:
+            script = self.config.stop_script
+            if not os.path.isabs(script):
+                script = os.path.join(self.cwd, script)
+            script = os.path.abspath(script)
+            if os.path.isfile(script):
+                os.chmod(script, 0o755)
+                log.info("[server] Using stop script: %s", script)
+                return f"bash {script}"
+            else:
+                log.warning("[server] Stop script not found: %s, will use kill", script)
+                return None
+
+        if self.config.stop_cmd:
+            return self.config.stop_cmd
+
+        return None
+
     def start(self) -> bool:
         """启动 vLLM 服务, 返回是否成功"""
         log.info("[server] Starting vLLM service ...")
-        log.info("[server] Command: %s", self.config.start_cmd)
         log.info("[server] Endpoint: %s, health: %s", self.base_url, self.config.health_endpoint)
         log.info("[server] Ready timeout: %ds, check interval: %ds",
                  self.config.ready_timeout, self.config.ready_interval)
+
+        try:
+            cmd, use_shell = self._resolve_start_cmd()
+        except FileNotFoundError as e:
+            log.error("[server] %s", e)
+            return False
 
         env = os.environ.copy()
         if self.config.env:
@@ -162,8 +225,8 @@ class VllmServer:
 
         try:
             self.process = subprocess.Popen(
-                self.config.start_cmd,
-                shell=True,
+                cmd,
+                shell=use_shell,
                 cwd=self.cwd,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -220,10 +283,11 @@ class VllmServer:
     def stop(self):
         """停止 vLLM 服务"""
         log.info("[server] Stopping vLLM service ...")
-        if self.config.stop_cmd:
-            log.info("[server] Running custom stop command: %s", self.config.stop_cmd)
+        stop_cmd = self._resolve_stop_cmd()
+        if stop_cmd:
+            log.info("[server] Running stop command: %s", stop_cmd)
             result = subprocess.run(
-                self.config.stop_cmd, shell=True, cwd=self.cwd,
+                stop_cmd, shell=True, cwd=self.cwd,
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
@@ -261,6 +325,20 @@ class VllmServer:
         return ""
 
 
+def _resolve_script(script_path: str, cwd: str, label: str) -> str:
+    """将脚本路径解析为可执行的 shell 命令, 处理相对路径和权限"""
+    if not os.path.isabs(script_path):
+        script_path = os.path.join(cwd, script_path)
+    script_path = os.path.abspath(script_path)
+
+    if not os.path.isfile(script_path):
+        raise FileNotFoundError(f"{label} 脚本不存在: {script_path}")
+
+    os.chmod(script_path, 0o755)
+    log.info("[%s] Using script: %s", label, script_path)
+    return f"bash {script_path}"
+
+
 # ── Benchmark 执行 ───────────────────────────────────────────────────────────
 
 
@@ -275,8 +353,28 @@ def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
         "check_detail": "...", # 校验详情
     }
     """
-    log.info("[bench] ─── Running benchmark: %s ───", bench.name)
-    log.info("[bench] Command: %s", bench.cmd)
+    # 解析 benchmark 的执行命令
+    run_cmd = bench.cmd
+    if bench.script:
+        script_path = bench.script
+        if not os.path.isabs(script_path):
+            script_path = os.path.join(cwd, script_path)
+        script_path = os.path.abspath(script_path)
+        if not os.path.isfile(script_path):
+            log.error("[bench] Script not found: %s", script_path)
+            return {
+                "name": bench.name, "passed": False,
+                "result": None, "output": f"[SCRIPT NOT FOUND: {script_path}]",
+                "check_detail": f"script not found: {script_path}",
+            }
+        os.chmod(script_path, 0o755)
+        run_cmd = f"bash {script_path}"
+        log.info("[bench] ─── Running benchmark: %s (script) ───", bench.name)
+        log.info("[bench] Script: %s", script_path)
+    else:
+        log.info("[bench] ─── Running benchmark: %s (cmd) ───", bench.name)
+        log.info("[bench] Command: %s", run_cmd)
+
     log.info("[bench] Timeout: %ds, result_file: %s, check rules: %s",
              bench.timeout,
              bench.result_file or "(none)",
@@ -285,7 +383,7 @@ def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
     bench_start = time.time()
     try:
         proc = subprocess.run(
-            bench.cmd, shell=True, cwd=cwd, env=env,
+            run_cmd, shell=True, cwd=cwd, env=env,
             capture_output=True, text=True, timeout=bench.timeout,
         )
         output = proc.stdout + "\n" + proc.stderr
@@ -515,12 +613,21 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
 
     try:
         # ── Step 1: Setup ──
-        if config.setup_cmd:
+        setup_run_cmd = None
+        if config.setup_script:
+            try:
+                setup_run_cmd = _resolve_script(config.setup_script, repo_dir, "setup")
+            except FileNotFoundError as e:
+                return False, str(e)
+        elif config.setup_cmd:
+            setup_run_cmd = config.setup_cmd
+
+        if setup_run_cmd:
             log.info("[step 1/4] Running setup ...")
-            log.info("[setup] Command: %s", config.setup_cmd)
+            log.info("[setup] Command: %s", setup_run_cmd)
             setup_start = time.time()
             proc = subprocess.run(
-                config.setup_cmd, shell=True, cwd=repo_dir, env=env,
+                setup_run_cmd, shell=True, cwd=repo_dir, env=env,
                 capture_output=True, text=True, timeout=600,
             )
             setup_elapsed = time.time() - setup_start
@@ -531,7 +638,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
                 return False, msg
             log.info("[setup] Completed in %.1fs", setup_elapsed)
         else:
-            log.info("[step 1/4] No setup command, skipping")
+            log.info("[step 1/4] No setup command/script, skipping")
 
         # ── Step 2: Start server ──
         if config.server:
@@ -586,10 +693,19 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
         if server:
             server.stop()
 
-        if config.cleanup_cmd:
-            log.info("[cleanup] Running: %s", config.cleanup_cmd)
+        cleanup_run_cmd = None
+        if config.cleanup_script:
+            try:
+                cleanup_run_cmd = _resolve_script(config.cleanup_script, repo_dir, "cleanup")
+            except FileNotFoundError as e:
+                log.warning("[cleanup] %s", e)
+        elif config.cleanup_cmd:
+            cleanup_run_cmd = config.cleanup_cmd
+
+        if cleanup_run_cmd:
+            log.info("[cleanup] Running: %s", cleanup_run_cmd)
             cleanup_result = subprocess.run(
-                config.cleanup_cmd, shell=True, cwd=repo_dir,
+                cleanup_run_cmd, shell=True, cwd=repo_dir,
                 capture_output=True, text=True, timeout=60,
             )
             if cleanup_result.returncode != 0:
@@ -597,7 +713,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
             else:
                 log.info("[cleanup] Done")
         else:
-            log.info("[cleanup] No cleanup command configured")
+            log.info("[cleanup] No cleanup command/script configured")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
