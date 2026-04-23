@@ -1,0 +1,29 @@
+{
+  "repo_dir": "/path/to/vllm-ascend",
+  "github_repo": "vllm-project/vllm-ascend",
+  "good": "v0.7.0",
+  "bad": "main",
+  "scenarios": [
+    {
+      "name": "llama_single_npu",
+      "test_script": "./scenarios/test_llama_single.sh",
+      "setup_cmd": "pip install -e . --no-deps -q",
+      "timeout": 600,
+      "description": "LLaMA 7B single NPU inference"
+    },
+    {
+      "name": "qwen_tp2",
+      "cmd": "python -m pytest tests/e2e/test_qwen_tp2.py -x",
+      "setup_cmd": "pip install -e . --no-deps -q",
+      "timeout": 900,
+      "description": "Qwen 14B tensor parallel=2 inference"
+    },
+    {
+      "name": "deepseek_moe",
+      "test_script": "./scenarios/test_deepseek_moe.sh",
+      "setup_script": "./scenarios/setup_full.sh",
+      "timeout": 1200,
+      "description": "DeepSeek MoE model serving"
+    }
+  ]
+}
