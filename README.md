@@ -36,18 +36,23 @@ python bisect_pr.py \
 YAML 配置示例（脚本模式，完整模板见 `scenes/example_script_mode.yaml`）：
 
 ```yaml
-name: llama_7b_full_validation
-description: "LLaMA-7B 完整验证"
+name: glm5_w4a8_validation
+description: "GLM5-w4a8 16卡推理验证"
 
-# 安装脚本
+# 安装脚本 (每个 commit 都会重新安装, 日志中会打印安装过程)
 setup_script: ./scripts/setup.sh
 
 # vLLM 服务 — 通过脚本启停
 server:
-  start_script: ./scripts/start_vllm.sh   # 启动脚本 (需保持前台运行)
-  stop_script: ./scripts/stop_vllm.sh     # 停止脚本 (可选)
-  port: 8000
-  ready_timeout: 300
+  start_script: ./scripts/start_vllm.sh   # 启动脚本 (内含环境变量和参数, 需保持前台运行)
+  stop_script: ./scripts/stop_vllm.sh     # 停止脚本 (可选, 默认 kill 进程)
+
+  # 通过日志关键字判断服务就绪 (推荐)
+  ready_keyword: "Uvicorn running on"
+
+  host: 0.0.0.0
+  port: 8077
+  ready_timeout: 600                      # 大模型加载慢
 
 # 验证任务 — 通过脚本执行
 benchmarks:
@@ -126,11 +131,12 @@ python bisect_pr.py \
 
 ```
   ┌─────────────┐
-  │   setup     │  安装脚本/命令
+  │   setup     │  重新安装 vllm-ascend (日志打印安装过程)
   └──────┬──────┘
          ▼
   ┌─────────────┐
-  │ start vLLM  │  启动脚本/命令, 轮询 /health 等待就绪
+  │ start vLLM  │  bash 拉起脚本, 实时打印服务日志
+  │             │  检测日志关键字 / HTTP 健康检查 → 判定就绪
   └──────┬──────┘
          ▼
   ┌─────────────┐
@@ -155,8 +161,10 @@ python bisect_pr.py \
 |------|------|
 | `name` | 场景名称 |
 | `setup_cmd` / `setup_script` | 每个 commit 的安装命令/脚本 |
-| `server.start_cmd` / `server.start_script` | vLLM 启动命令/脚本 |
+| `server.start_cmd` / `server.start_script` | vLLM 启动命令/脚本 (脚本内含环境变量和参数) |
 | `server.stop_cmd` / `server.stop_script` | vLLM 停止命令/脚本 (可选, 默认 kill 进程) |
+| `server.ready_keyword` | 日志关键字检测就绪 (推荐, 如 `"Uvicorn running on"`) |
+| `server.health_endpoint` | HTTP 健康检查路径 (与 ready_keyword 二选一, 默认 `/health`) |
 | `server.port` | 服务端口 |
 | `server.ready_timeout` | 等待就绪超时(秒) |
 | `server.env` | 额外环境变量 (如 `ASCEND_RT_VISIBLE_DEVICES`) |
@@ -164,6 +172,38 @@ python bisect_pr.py \
 | `benchmarks[].result_file` | 结果 JSON 文件路径 |
 | `benchmarks[].check` | 校验规则 |
 | `cleanup_cmd` / `cleanup_script` | 清理命令/脚本 |
+
+### 服务就绪检测 (二选一)
+
+**方式一: 日志关键字 (推荐)**
+
+实时读取 vLLM 进程的 stdout，逐行打印日志，检测到关键字即判定就绪：
+
+```yaml
+server:
+  start_script: ./start_vllm.sh
+  ready_keyword: "Uvicorn running on"   # vLLM 启动完成后会打印此日志
+  ready_timeout: 600
+```
+
+**方式二: HTTP 健康检查**
+
+轮询 HTTP 接口，返回 200 即就绪：
+
+```yaml
+server:
+  start_script: ./start_vllm.sh
+  health_endpoint: /health              # 默认值
+  ready_timeout: 300
+```
+
+### 每次安装的日志
+
+因为二分查找每个 commit 都需要重新安装 vllm-ascend，工具会详细打印：
+- 当前测试的 commit SHA
+- 安装命令/脚本的执行过程（输出最后 30 行）
+- 安装耗时
+- 安装失败时的 stderr 详情
 
 ### 校验规则语法
 

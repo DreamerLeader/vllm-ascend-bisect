@@ -51,13 +51,17 @@ log = logging.getLogger(__name__)
 @dataclass
 class ServerConfig:
     """vLLM 服务配置"""
-    start_cmd: str = ""             # 启动命令, 如 "python -m vllm.entrypoints.openai.api_server ..."
-    start_script: str = ""          # 启动脚本文件路径, 如 "./start_vllm.sh" (与 start_cmd 二选一)
+    start_cmd: str = ""             # 启动命令 (与 start_script 二选一)
+    start_script: str = ""          # 启动脚本文件路径, 如 "./start_vllm.sh"
     host: str = "127.0.0.1"
     port: int = 8000
-    health_endpoint: str = "/health"          # 健康检查路径
+    # 就绪检测方式 (二选一):
+    #   1. ready_keyword: 监控服务日志, 出现关键字即就绪 (推荐, 如 "Uvicorn running on")
+    #   2. health_endpoint: 轮询 HTTP 健康检查接口
+    ready_keyword: str = ""                   # 日志关键字检测, 如 "Uvicorn running on"
+    health_endpoint: str = "/health"          # HTTP 健康检查路径
     ready_timeout: int = 300                  # 等待服务就绪的超时(秒)
-    ready_interval: int = 5                   # 健康检查间隔(秒)
+    ready_interval: int = 2                   # 健康检查间隔(秒)
     stop_cmd: str = ""                        # 自定义停止命令(可选, 默认 kill 进程)
     stop_script: str = ""                     # 自定义停止脚本(可选)
     env: dict = None                          # 额外环境变量
@@ -104,9 +108,10 @@ def load_config(path: str) -> SceneConfig:
             start_script=s.get("start_script", ""),
             host=s.get("host", "127.0.0.1"),
             port=s.get("port", 8000),
+            ready_keyword=s.get("ready_keyword", ""),
             health_endpoint=s.get("health_endpoint", "/health"),
             ready_timeout=s.get("ready_timeout", 300),
-            ready_interval=s.get("ready_interval", 5),
+            ready_interval=s.get("ready_interval", 2),
             stop_cmd=s.get("stop_cmd", ""),
             stop_script=s.get("stop_script", ""),
             env=s.get("env"),
@@ -137,8 +142,13 @@ def load_config(path: str) -> SceneConfig:
         cleanup_script=raw.get("cleanup_script", ""),
     )
     log.info("[config] Scene: %s (%s)", config.name, config.description or "no description")
-    log.info("[config] Setup: %s", config.setup_cmd or "(none)")
-    log.info("[config] Server: %s", "configured" if config.server else "(none)")
+    log.info("[config] Setup: %s", config.setup_script or config.setup_cmd or "(none)")
+    if config.server:
+        log.info("[config] Server: start=%s, ready=%s",
+                 config.server.start_script or config.server.start_cmd or "?",
+                 f"keyword:'{config.server.ready_keyword}'" if config.server.ready_keyword else f"health:{config.server.health_endpoint}")
+    else:
+        log.info("[config] Server: (none)")
     log.info("[config] Benchmarks: %d task(s) — %s",
              len(config.benchmarks),
              ", ".join(b.name for b in config.benchmarks))
@@ -156,20 +166,16 @@ class VllmServer:
         self.config = config
         self.cwd = cwd
         self.process: Optional[subprocess.Popen] = None
+        self._log_lines: list[str] = []  # 收集服务日志
 
     @property
     def base_url(self) -> str:
         return f"http://{self.config.host}:{self.config.port}"
 
-    def _resolve_start_cmd(self) -> tuple[str | list[str], bool]:
-        """
-        解析启动方式, 返回 (cmd, use_shell).
-        - start_script: 脚本文件路径, 自动处理权限和绝对路径
-        - start_cmd: shell 命令字符串
-        """
+    def _resolve_start_cmd(self) -> str:
+        """解析启动脚本/命令, 返回 shell 命令字符串"""
         if self.config.start_script:
             script = self.config.start_script
-            # 相对路径基于 cwd 解析
             if not os.path.isabs(script):
                 script = os.path.join(self.cwd, script)
             script = os.path.abspath(script)
@@ -179,11 +185,10 @@ class VllmServer:
 
             os.chmod(script, 0o755)
             log.info("[server] Using start script: %s", script)
-            # 用 bash 显式执行, 避免 shebang 问题
-            return f"bash {script}", True
+            return f"bash {script}"
 
         log.info("[server] Using start command: %s", self.config.start_cmd)
-        return self.config.start_cmd, True
+        return self.config.start_cmd
 
     def _resolve_stop_cmd(self) -> Optional[str]:
         """解析停止命令/脚本"""
@@ -207,13 +212,17 @@ class VllmServer:
 
     def start(self) -> bool:
         """启动 vLLM 服务, 返回是否成功"""
-        log.info("[server] Starting vLLM service ...")
-        log.info("[server] Endpoint: %s, health: %s", self.base_url, self.config.health_endpoint)
-        log.info("[server] Ready timeout: %ds, check interval: %ds",
-                 self.config.ready_timeout, self.config.ready_interval)
+        log.info("[server] ========== Starting vLLM service ==========")
+        log.info("[server] Endpoint: %s:%d", self.config.host, self.config.port)
+        if self.config.ready_keyword:
+            log.info("[server] Ready detection: log keyword '%s'", self.config.ready_keyword)
+        else:
+            log.info("[server] Ready detection: HTTP health check %s%s",
+                     self.base_url, self.config.health_endpoint)
+        log.info("[server] Ready timeout: %ds", self.config.ready_timeout)
 
         try:
-            cmd, use_shell = self._resolve_start_cmd()
+            cmd = self._resolve_start_cmd()
         except FileNotFoundError as e:
             log.error("[server] %s", e)
             return False
@@ -221,27 +230,103 @@ class VllmServer:
         env = os.environ.copy()
         if self.config.env:
             env.update({k: str(v) for k, v in self.config.env.items()})
-            log.info("[server] Extra env: %s", ", ".join(f"{k}={v}" for k, v in self.config.env.items()))
+            log.info("[server] Extra env vars:")
+            for k, v in self.config.env.items():
+                log.info("[server]   %s=%s", k, v)
 
         try:
             self.process = subprocess.Popen(
                 cmd,
-                shell=use_shell,
+                shell=True,
                 cwd=self.cwd,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid,  # 新进程组, 方便 kill 整棵进程树
+                preexec_fn=os.setsid,
             )
         except Exception as e:
-            log.error("[server] Failed to start: %s", e)
+            log.error("[server] Failed to start process: %s", e)
             return False
 
-        log.info("[server] PID: %d, waiting for ready ...", self.process.pid)
-        return self._wait_ready()
+        log.info("[server] Process started, PID: %d", self.process.pid)
+        log.info("[server] Waiting for service ready ...")
 
-    def _wait_ready(self) -> bool:
-        """轮询健康检查, 等待服务就绪"""
+        if self.config.ready_keyword:
+            return self._wait_ready_by_log()
+        else:
+            return self._wait_ready_by_health()
+
+    def _wait_ready_by_log(self) -> bool:
+        """
+        实时读取服务 stdout, 逐行打印日志,
+        检测到 ready_keyword 即判定就绪。
+        """
+        import select
+
+        keyword = self.config.ready_keyword
+        deadline = time.time() + self.config.ready_timeout
+        start_time = time.time()
+        line_buf = ""
+
+        log.info("[server] Monitoring log for keyword: '%s'", keyword)
+
+        while time.time() < deadline:
+            # 进程退出检查
+            if self.process.poll() is not None:
+                # 读取剩余输出
+                remaining_output = self.process.stdout.read().decode(errors="replace") if self.process.stdout else ""
+                for line in remaining_output.splitlines():
+                    log.info("[vllm] %s", line)
+                    self._log_lines.append(line)
+                log.error("[server] Process exited prematurely (rc=%d) after %.1fs",
+                          self.process.returncode, time.time() - start_time)
+                return False
+
+            # 非阻塞读取 stdout
+            try:
+                ready_fds, _, _ = select.select([self.process.stdout], [], [], self.config.ready_interval)
+            except (ValueError, OSError):
+                break
+
+            if ready_fds:
+                chunk = self.process.stdout.read1(8192).decode(errors="replace")
+                if not chunk:
+                    continue
+
+                line_buf += chunk
+                while "\n" in line_buf:
+                    line, line_buf = line_buf.split("\n", 1)
+                    line = line.rstrip("\r")
+                    self._log_lines.append(line)
+                    log.info("[vllm] %s", line)
+
+                    if keyword in line:
+                        elapsed = time.time() - start_time
+                        log.info("[server] ========================================")
+                        log.info("[server] vLLM service READY! (%.1fs)", elapsed)
+                        log.info("[server] Matched keyword '%s' in log", keyword)
+                        log.info("[server] ========================================")
+                        return True
+
+            # 定期状态打印
+            elapsed = time.time() - start_time
+            if int(elapsed) > 0 and int(elapsed) % 30 == 0:
+                log.info("[server] Still waiting ... (%.0fs elapsed, %.0fs remaining)",
+                         elapsed, deadline - time.time())
+
+        # 超时, 打印缓冲区中剩余内容
+        if line_buf.strip():
+            log.info("[vllm] %s", line_buf.strip())
+
+        log.error("[server] Timeout: keyword '%s' not found in log after %ds",
+                  keyword, self.config.ready_timeout)
+        log.error("[server] Last %d lines of log:", min(20, len(self._log_lines)))
+        for line in self._log_lines[-20:]:
+            log.error("[vllm]   %s", line)
+        return False
+
+    def _wait_ready_by_health(self) -> bool:
+        """通过 HTTP 健康检查等待就绪"""
         url = f"{self.base_url}{self.config.health_endpoint}"
         deadline = time.time() + self.config.ready_timeout
         attempt = 0
@@ -249,14 +334,16 @@ class VllmServer:
 
         log.info("[server] Health check URL: %s", url)
 
+        # 启动一个线程持续读取并打印服务日志
+        import threading
+        log_thread = threading.Thread(target=self._stream_logs, daemon=True)
+        log_thread.start()
+
         while time.time() < deadline:
             attempt += 1
-            # 检查进程是否已退出
             if self.process.poll() is not None:
-                stdout = self.process.stdout.read().decode(errors="replace") if self.process.stdout else ""
                 log.error("[server] Process exited prematurely (rc=%d) after %.1fs",
                           self.process.returncode, time.time() - start_time)
-                log.error("[server] Output tail:\n%s", stdout[-2000:])
                 return False
 
             try:
@@ -266,23 +353,35 @@ class VllmServer:
                 )
                 if result.returncode == 0:
                     elapsed = time.time() - start_time
-                    log.info("[server] Ready! Health check passed after %d attempts (%.1fs)", attempt, elapsed)
+                    log.info("[server] ========================================")
+                    log.info("[server] vLLM service READY! (%.1fs, %d checks)", elapsed, attempt)
+                    log.info("[server] ========================================")
                     return True
             except (subprocess.TimeoutExpired, Exception):
                 pass
 
             remaining = deadline - time.time()
-            if attempt % 6 == 0:  # 每 30 秒左右打印一次等待状态
-                log.info("[server] Still waiting for ready ... (attempt %d, %.0fs remaining)", attempt, remaining)
+            if attempt % 15 == 0:
+                log.info("[server] Still waiting ... (attempt %d, %.0fs remaining)", attempt, remaining)
 
             time.sleep(self.config.ready_interval)
 
         log.error("[server] Not ready after %ds (%d attempts)", self.config.ready_timeout, attempt)
         return False
 
+    def _stream_logs(self):
+        """后台线程: 持续读取服务 stdout 并打印"""
+        try:
+            for raw_line in iter(self.process.stdout.readline, b""):
+                line = raw_line.decode(errors="replace").rstrip("\n\r")
+                self._log_lines.append(line)
+                log.info("[vllm] %s", line)
+        except (ValueError, OSError):
+            pass
+
     def stop(self):
         """停止 vLLM 服务"""
-        log.info("[server] Stopping vLLM service ...")
+        log.info("[server] ========== Stopping vLLM service ==========")
         stop_cmd = self._resolve_stop_cmd()
         if stop_cmd:
             log.info("[server] Running stop command: %s", stop_cmd)
@@ -309,20 +408,12 @@ class VllmServer:
                     log.info("[server] Process already exited")
         elif self.process:
             log.info("[server] Process already exited (rc=%d)", self.process.returncode)
-        else:
-            log.debug("[server] No process to stop")
 
-    def get_output(self) -> str:
-        """获取服务的 stdout/stderr 输出"""
-        if self.process and self.process.stdout:
-            try:
-                # 非阻塞读取
-                import select
-                if select.select([self.process.stdout], [], [], 0)[0]:
-                    return self.process.stdout.read(10000).decode(errors="replace")
-            except Exception:
-                pass
-        return ""
+        log.info("[server] Total log lines collected: %d", len(self._log_lines))
+
+    def get_log(self) -> str:
+        """获取收集到的全部服务日志"""
+        return "\n".join(self._log_lines)
 
 
 def _resolve_script(script_path: str, cwd: str, label: str) -> str:
@@ -623,20 +714,41 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
             setup_run_cmd = config.setup_cmd
 
         if setup_run_cmd:
-            log.info("[step 1/4] Running setup ...")
+            log.info("[step 1/4] ========== Installing vllm-ascend ==========")
             log.info("[setup] Command: %s", setup_run_cmd)
+            log.info("[setup] Working dir: %s", repo_dir)
+            commit_sha = ""
+            try:
+                git_result = subprocess.run(
+                    ["git", "-C", repo_dir, "log", "--oneline", "-1"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if git_result.returncode == 0:
+                    commit_sha = git_result.stdout.strip()
+                    log.info("[setup] Current commit: %s", commit_sha)
+            except Exception:
+                pass
+
             setup_start = time.time()
             proc = subprocess.run(
                 setup_run_cmd, shell=True, cwd=repo_dir, env=env,
                 capture_output=True, text=True, timeout=600,
             )
             setup_elapsed = time.time() - setup_start
+
+            # 打印安装过程输出
+            if proc.stdout:
+                for line in proc.stdout.strip().splitlines()[-30:]:
+                    log.info("[setup] %s", line)
             if proc.returncode != 0:
                 msg = f"Setup failed (rc={proc.returncode}) after {setup_elapsed:.1f}s"
                 log.error("[setup] %s", msg)
-                log.error("[setup] stderr: %s", proc.stderr[-1000:])
+                if proc.stderr:
+                    log.error("[setup] ---- stderr ----")
+                    for line in proc.stderr.strip().splitlines()[-20:]:
+                        log.error("[setup] %s", line)
                 return False, msg
-            log.info("[setup] Completed in %.1fs", setup_elapsed)
+            log.info("[setup] Install completed in %.1fs", setup_elapsed)
         else:
             log.info("[step 1/4] No setup command/script, skipping")
 

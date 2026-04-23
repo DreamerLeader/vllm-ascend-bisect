@@ -2,6 +2,7 @@
 # 场景配置示例: 全部使用脚本文件 (推荐实际使用)
 # ============================================================
 # 开发提供各阶段的 shell 脚本, 无需在 YAML 里写复杂命令
+# 启动脚本里已经包含了所有环境变量和 vllm serve 参数
 #
 # 使用方式:
 #   python bisect_pr.py \
@@ -10,32 +11,31 @@
 #       --cmd "python test_runner.py --config scenes/example_script_mode.yaml"
 # ============================================================
 
-name: llama_7b_full_validation
-description: "LLaMA-7B 完整验证 (脚本模式)"
+name: glm5_w4a8_validation
+description: "GLM5-w4a8 16卡推理精度+性能验证"
 
-# ── 安装脚本 ──
+# ── 安装脚本 (每个 commit 都会重新安装) ──
 setup_script: ./scripts/setup.sh
 
 # ── vLLM 服务 ──
 server:
-  # 启动脚本 (脚本内启动 vLLM, 需保持前台运行)
+  # 启动脚本 (内含环境变量、vllm serve 参数, 需保持前台运行)
   start_script: ./scripts/start_vllm.sh
 
-  # 停止脚本 (可选, 不配则自动 kill 进程)
+  # 通过日志关键字判断服务就绪 (推荐)
+  # vllm 启动完成后会打印类似 "Uvicorn running on http://0.0.0.0:8077" 的日志
+  ready_keyword: "Uvicorn running on"
+
+  host: 0.0.0.0
+  port: 8077
+  ready_timeout: 600       # 大模型加载慢, 给 10 分钟
+
+  # 停止脚本 (可选, 不配则自动 kill 进程组)
   stop_script: ./scripts/stop_vllm.sh
-
-  host: 127.0.0.1
-  port: 8000
-  ready_timeout: 300
-  ready_interval: 5
-
-  env:
-    ASCEND_RT_VISIBLE_DEVICES: "0"
 
 # ── 验证任务 ──
 benchmarks:
   - name: accuracy_check
-    # 精度验证脚本
     script: ./scripts/run_accuracy.sh
     timeout: 600
     result_file: /tmp/accuracy_result.json
@@ -44,7 +44,6 @@ benchmarks:
       pass_rate: ">= 0.90"
 
   - name: performance_check
-    # 性能验证脚本
     script: ./scripts/run_performance.sh
     timeout: 600
     result_file: /tmp/perf_result.json
