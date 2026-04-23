@@ -22,9 +22,9 @@
 
 ## 快速开始
 
-### 方式一: 场景配置 (推荐)
+### 方式一: 场景配置 — 脚本模式 (推荐)
 
-开发只需写一个 YAML 配置，描述：服务怎么启、跑什么验证、阈值是多少。
+实际场景中，拉起 vLLM、跑精度/性能验证都是独立的 shell 脚本。开发只需在 YAML 里填各阶段的脚本路径：
 
 ```bash
 python bisect_pr.py \
@@ -33,16 +33,51 @@ python bisect_pr.py \
     --cmd "python test_runner.py --config scenes/my_scene.yaml"
 ```
 
-YAML 配置示例（完整模板见 `scenes/` 目录）：
+YAML 配置示例（脚本模式，完整模板见 `scenes/example_script_mode.yaml`）：
+
+```yaml
+name: llama_7b_full_validation
+description: "LLaMA-7B 完整验证"
+
+# 安装脚本
+setup_script: ./scripts/setup.sh
+
+# vLLM 服务 — 通过脚本启停
+server:
+  start_script: ./scripts/start_vllm.sh   # 启动脚本 (需保持前台运行)
+  stop_script: ./scripts/stop_vllm.sh     # 停止脚本 (可选)
+  port: 8000
+  ready_timeout: 300
+
+# 验证任务 — 通过脚本执行
+benchmarks:
+  - name: accuracy_check
+    script: ./scripts/run_accuracy.sh      # 精度验证脚本
+    timeout: 600
+    result_file: /tmp/accuracy_result.json
+    check:
+      accuracy: ">= 0.95"
+
+  - name: performance_check
+    script: ./scripts/run_performance.sh   # 性能验证脚本
+    timeout: 600
+    result_file: /tmp/perf_result.json
+    check:
+      throughput: ">= 100"
+      latency_p99: "<= 200"
+
+# 清理脚本
+cleanup_script: ./scripts/cleanup.sh
+```
+
+### 方式二: 场景配置 — 命令模式
+
+不想单独写脚本文件时，也可以直接在 YAML 里写命令：
 
 ```yaml
 name: llama_7b_accuracy
-description: "LLaMA-7B 精度+性能验证"
-
-# 每个 commit 切换后先安装
 setup_cmd: "pip install -e . --no-deps -q"
 
-# vLLM 服务配置 — 工具自动管理启停
 server:
   start_cmd: >
     python -m vllm.entrypoints.openai.api_server
@@ -51,7 +86,6 @@ server:
   port: 8000
   ready_timeout: 300
 
-# 验证任务 — 服务就绪后依次运行
 benchmarks:
   - name: accuracy
     cmd: >
@@ -62,22 +96,12 @@ benchmarks:
       --output /tmp/acc.json
     result_file: /tmp/acc.json
     check:
-      accuracy: ">= 0.95"      # 精度 >= 95% 才算通过
-
-  - name: performance
-    cmd: >
-      aisbench performance
-      --url $VLLM_BASE_URL/v1/completions
-      --model llama-7b
-      --concurrency 16
-      --output /tmp/perf.json
-    result_file: /tmp/perf.json
-    check:
-      throughput: ">= 100"     # 吞吐 >= 100 tokens/s
-      latency_p99: "<= 200"   # P99 延迟 <= 200ms
+      accuracy: ">= 0.95"
 ```
 
-### 方式二: 简单脚本
+### 方式三: 简单脚本
+
+不需要场景配置时，直接传测试脚本：
 
 ```bash
 python bisect_pr.py \
@@ -87,7 +111,7 @@ python bisect_pr.py \
     --setup-cmd "pip install -e . --no-deps -q"
 ```
 
-### 方式三: 内联命令
+### 方式四: 内联命令
 
 ```bash
 python bisect_pr.py \
@@ -102,16 +126,16 @@ python bisect_pr.py \
 
 ```
   ┌─────────────┐
-  │   setup     │  pip install -e . --no-deps
+  │   setup     │  安装脚本/命令
   └──────┬──────┘
          ▼
   ┌─────────────┐
-  │ start vLLM  │  拉起服务, 轮询 /health 等待就绪
+  │ start vLLM  │  启动脚本/命令, 轮询 /health 等待就绪
   └──────┬──────┘
          ▼
   ┌─────────────┐
-  │  benchmark  │  运行 aisbench 精度验证
-  │  benchmark  │  运行 aisbench 性能验证
+  │  benchmark  │  精度验证脚本/命令
+  │  benchmark  │  性能验证脚本/命令
   └──────┬──────┘
          ▼
   ┌─────────────┐
@@ -119,24 +143,27 @@ python bisect_pr.py \
   └──────┬──────┘
          ▼
   ┌─────────────┐
-  │  cleanup    │  停止服务, 清理临时文件
+  │  cleanup    │  停止服务, 清理脚本/命令
   └─────────────┘
 ```
 
 ### 配置字段说明
 
+每个阶段都支持 `cmd`（内联命令）和 `script`（脚本文件路径）两种方式，二选一。脚本文件支持相对路径（基于仓库目录解析），工具自动设置执行权限并通过 `bash` 执行。
+
 | 字段 | 说明 |
 |------|------|
 | `name` | 场景名称 |
-| `setup_cmd` | 每个 commit 的安装命令 |
-| `server.start_cmd` | vLLM 启动命令 |
+| `setup_cmd` / `setup_script` | 每个 commit 的安装命令/脚本 |
+| `server.start_cmd` / `server.start_script` | vLLM 启动命令/脚本 |
+| `server.stop_cmd` / `server.stop_script` | vLLM 停止命令/脚本 (可选, 默认 kill 进程) |
 | `server.port` | 服务端口 |
 | `server.ready_timeout` | 等待就绪超时(秒) |
 | `server.env` | 额外环境变量 (如 `ASCEND_RT_VISIBLE_DEVICES`) |
-| `benchmarks[].cmd` | 验证命令 (可用 `$VLLM_BASE_URL`) |
+| `benchmarks[].cmd` / `benchmarks[].script` | 验证命令/脚本 |
 | `benchmarks[].result_file` | 结果 JSON 文件路径 |
 | `benchmarks[].check` | 校验规则 |
-| `cleanup_cmd` | 清理命令 |
+| `cleanup_cmd` / `cleanup_script` | 清理命令/脚本 |
 
 ### 校验规则语法
 
@@ -159,7 +186,7 @@ check:
 
 ### 环境变量
 
-benchmark 命令中可使用以下环境变量：
+benchmark 脚本/命令中可使用以下环境变量：
 
 | 变量 | 值 |
 |------|------|
@@ -214,7 +241,8 @@ python run_bisect.py \
 
 | 文件 | 适用场景 |
 |------|----------|
-| `scenes/example_accuracy.yaml` | 单卡精度+性能验证 |
+| `scenes/example_script_mode.yaml` | 全脚本模式 (推荐, 贴近实际使用) |
+| `scenes/example_accuracy.yaml` | 单卡精度+性能验证 (命令模式) |
 | `scenes/example_tp2.yaml` | 多卡 TP=2 验证 |
 | `scenes/example_multimodel.yaml` | 纯脚本模式 (不管理服务) |
 
