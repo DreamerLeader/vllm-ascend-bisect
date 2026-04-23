@@ -1,0 +1,79 @@
+# ============================================================
+# 场景配置示例: LLaMA 精度 + 性能验证
+# ============================================================
+# 开发只需要复制这个文件, 修改对应参数即可
+#
+# 使用方式:
+#   python bisect_pr.py \
+#       --repo-dir ./vllm-ascend \
+#       --good v0.7.0 --bad main \
+#       --cmd "python test_runner.py --config scenes/example_accuracy.yaml"
+# ============================================================
+
+name: llama_7b_accuracy_perf
+description: "LLaMA-7B 在 Ascend 910B 上的精度和性能回归验证"
+
+# ── 安装命令 (每个 commit 切换后执行) ──
+setup_cmd: "pip install -e . --no-deps -q"
+
+# ── vLLM 服务配置 ──
+server:
+  # 启动命令
+  start_cmd: >
+    python -m vllm.entrypoints.openai.api_server
+    --model /data/models/llama-7b
+    --device npu
+    --host 127.0.0.1
+    --port 8000
+    --max-model-len 2048
+    --trust-remote-code
+
+  host: 127.0.0.1
+  port: 8000
+  health_endpoint: /health       # 健康检查接口
+  ready_timeout: 300             # 最多等 5 分钟服务就绪
+  ready_interval: 5              # 每 5 秒检查一次
+
+  # 额外环境变量 (可选)
+  env:
+    ASCEND_RT_VISIBLE_DEVICES: "0"
+    VLLM_USE_MODELSCOPE: "false"
+
+# ── 验证任务列表 ──
+benchmarks:
+  # ---- 精度验证 ----
+  - name: accuracy_check
+    # aisbench 精度验证命令
+    # 使用 $VLLM_BASE_URL 环境变量访问服务
+    cmd: >
+      aisbench accuracy
+      --url $VLLM_BASE_URL/v1/completions
+      --model llama-7b
+      --dataset /data/datasets/accuracy_bench.jsonl
+      --output /tmp/accuracy_result.json
+    timeout: 600
+    # 从文件读取结果
+    result_file: /tmp/accuracy_result.json
+    # 校验规则: 精度 >= 0.95 则通过
+    check:
+      accuracy: ">= 0.95"
+      pass_rate: ">= 0.90"
+
+  # ---- 性能验证 ----
+  - name: performance_check
+    cmd: >
+      aisbench performance
+      --url $VLLM_BASE_URL/v1/completions
+      --model llama-7b
+      --concurrency 16
+      --num-requests 200
+      --output /tmp/perf_result.json
+    timeout: 600
+    result_file: /tmp/perf_result.json
+    # 校验规则: 吞吐 >= 100 tokens/s, 延迟 P99 <= 200ms
+    check:
+      throughput: ">= 100"
+      latency_p99: "<= 200"
+
+# ── 清理命令 (可选) ──
+cleanup_cmd: "rm -f /tmp/accuracy_result.json /tmp/perf_result.json"

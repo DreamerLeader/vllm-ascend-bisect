@@ -1,0 +1,18 @@
+# ============================================================
+# 场景配置示例: 无需启动服务, 直接跑脚本
+# ============================================================
+# 适用于: 开发已有完整脚本, 只需要跑脚本判断结果
+
+name: custom_script_scene
+description: "通过自定义脚本验证, 不需要工具管理 vLLM 服务"
+
+setup_cmd: "pip install -e . --no-deps -q"
+
+# 不配置 server 段 → 不启动 vLLM 服务
+
+benchmarks:
+  - name: dev_custom_test
+    # 开发提供的完整脚本, 内部自行处理服务启停
+    cmd: "bash /path/to/dev_provided_test.sh"
+    timeout: 1800
+    # 无 check 段 → 以脚本 exit code 判断 pass/fail

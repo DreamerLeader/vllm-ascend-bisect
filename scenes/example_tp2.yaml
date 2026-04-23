@@ -1,0 +1,52 @@
+# ============================================================
+# 场景配置示例: 多卡 TP=2 场景
+# ============================================================
+
+name: qwen_14b_tp2
+description: "Qwen-14B TP=2 双卡推理验证"
+
+setup_cmd: "pip install -e . --no-deps -q"
+
+server:
+  start_cmd: >
+    python -m vllm.entrypoints.openai.api_server
+    --model /data/models/qwen-14b
+    --device npu
+    --tensor-parallel-size 2
+    --host 127.0.0.1
+    --port 8000
+    --trust-remote-code
+
+  port: 8000
+  ready_timeout: 600             # 大模型加载慢, 给 10 分钟
+
+  env:
+    ASCEND_RT_VISIBLE_DEVICES: "0,1"
+
+benchmarks:
+  - name: accuracy
+    cmd: >
+      aisbench accuracy
+      --url $VLLM_BASE_URL/v1/completions
+      --model qwen-14b
+      --dataset /data/datasets/qwen_eval.jsonl
+      --output /tmp/qwen_accuracy.json
+    timeout: 900
+    result_file: /tmp/qwen_accuracy.json
+    check:
+      accuracy: ">= 0.93"
+
+  - name: performance
+    cmd: >
+      aisbench performance
+      --url $VLLM_BASE_URL/v1/completions
+      --model qwen-14b
+      --concurrency 8
+      --num-requests 100
+      --output /tmp/qwen_perf.json
+    timeout: 900
+    result_file: /tmp/qwen_perf.json
+    check:
+      throughput: ">= 50"
+
+cleanup_cmd: "rm -f /tmp/qwen_accuracy.json /tmp/qwen_perf.json"
