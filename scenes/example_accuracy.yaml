@@ -7,7 +7,7 @@
 #   python bisect_pr.py \
 #       --repo-dir ./vllm-ascend \
 #       --good v0.7.0 --bad main \
-#       --cmd "python test_runner.py --config scenes/example_accuracy.yaml"
+#       --config scenes/example_accuracy.yaml
 # ============================================================
 
 name: llama_7b_accuracy_perf

@@ -41,6 +41,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 # ── Data structures ──────────────────────────────────────────────────────────
 
@@ -237,6 +239,20 @@ def run_test_at_commit(
     return result, output
 
 
+def build_scene_test_cmd(config_path: str, repo_dir: str) -> str:
+    """Build the test_runner command used by --config mode."""
+    config_path = os.path.abspath(config_path)
+    runner_path = os.path.join(TOOL_DIR, "test_runner.py")
+    return " ".join([
+        shlex.quote(sys.executable),
+        shlex.quote(runner_path),
+        "--config",
+        shlex.quote(config_path),
+        "--repo-dir",
+        shlex.quote(os.path.abspath(repo_dir)),
+    ])
+
+
 def _save_log(log_dir: str | None, sha: str, result: str, output: str):
     if not log_dir:
         return
@@ -408,6 +424,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
+  # 推荐: 使用场景 YAML 描述安装、服务、精度/性能指标
+  python bisect_pr.py \\
+      --repo-dir ./vllm-ascend \\
+      --good v0.7.0 --bad main \\
+      --config scenes/my_scene.yaml
+
   # 开发提供测试脚本文件
   python bisect_pr.py \\
       --repo-dir ./vllm-ascend \\
@@ -435,6 +457,7 @@ def main():
     parser.add_argument("--bad", required=True, help="已知异常的 commit/tag")
 
     test_group = parser.add_mutually_exclusive_group(required=True)
+    test_group.add_argument("--config", help="场景配置 YAML 文件 (推荐: setup/server/benchmarks/check)")
     test_group.add_argument("--test-script", help="开发提供的测试脚本文件路径 (exit 0=pass)")
     test_group.add_argument("--cmd", help="内联测试命令 (exit 0=pass)")
 
@@ -453,14 +476,27 @@ def main():
 
     args = parser.parse_args()
 
+    repo_dir = os.path.abspath(args.repo_dir)
+    if not os.path.isdir(repo_dir):
+        log.error("仓库目录不存在: %s", repo_dir)
+        sys.exit(1)
+
     # 解析 test 命令
-    if args.test_script:
+    if args.config:
+        config_path = os.path.abspath(args.config)
+        if not os.path.isfile(config_path):
+            log.error("场景配置不存在: %s", config_path)
+            sys.exit(1)
+        test_cmd = build_scene_test_cmd(config_path, repo_dir)
+        log.info("[config] Scene config: %s", config_path)
+        log.info("[config] Test command: %s", test_cmd)
+    elif args.test_script:
         test_script = os.path.abspath(args.test_script)
         if not os.path.isfile(test_script):
             log.error("测试脚本不存在: %s", test_script)
             sys.exit(1)
         os.chmod(test_script, 0o755)
-        test_cmd = test_script
+        test_cmd = f"bash {shlex.quote(test_script)}"
         log.info("[config] Test script: %s", test_script)
     else:
         test_cmd = args.cmd
@@ -469,22 +505,18 @@ def main():
     # 解析 setup 命令
     setup_cmd = None
     if args.setup_script:
-        setup_cmd = os.path.abspath(args.setup_script)
-        if not os.path.isfile(setup_cmd):
-            log.error("安装脚本不存在: %s", setup_cmd)
+        setup_script = os.path.abspath(args.setup_script)
+        if not os.path.isfile(setup_script):
+            log.error("安装脚本不存在: %s", setup_script)
             sys.exit(1)
-        os.chmod(setup_cmd, 0o755)
-        log.info("[config] Setup script: %s", setup_cmd)
+        os.chmod(setup_script, 0o755)
+        setup_cmd = f"bash {shlex.quote(setup_script)}"
+        log.info("[config] Setup script: %s", setup_script)
     elif args.setup_cmd:
         setup_cmd = args.setup_cmd
         log.info("[config] Setup command: %s", setup_cmd)
     else:
         log.info("[config] No setup command configured")
-
-    repo_dir = os.path.abspath(args.repo_dir)
-    if not os.path.isdir(repo_dir):
-        log.error("仓库目录不存在: %s", repo_dir)
-        sys.exit(1)
 
     log_dir = os.path.abspath(args.log_dir)
     log.info("[config] Repo: %s", repo_dir)

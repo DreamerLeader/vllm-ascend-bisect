@@ -30,7 +30,7 @@
 python bisect_pr.py \
     --repo-dir ./vllm-ascend \
     --good v0.7.0 --bad main \
-    --cmd "python test_runner.py --config scenes/my_scene.yaml"
+    --config scenes/my_scene.yaml
 ```
 
 YAML 配置示例（脚本模式，完整模板见 `scenes/example_script_mode.yaml`）：
@@ -51,6 +51,7 @@ server:
   ready_keyword: "Uvicorn running on"
 
   host: 0.0.0.0
+  client_host: 127.0.0.1                  # curl/aisbench 访问地址; host=0.0.0.0 时可省略
   port: 8077
   ready_timeout: 600                      # 大模型加载慢
 
@@ -155,17 +156,20 @@ python bisect_pr.py \
 
 ### 配置字段说明
 
-每个阶段都支持 `cmd`（内联命令）和 `script`（脚本文件路径）两种方式，二选一。脚本文件支持相对路径（基于仓库目录解析），工具自动设置执行权限并通过 `bash` 执行。
+每个阶段都支持 `cmd`（内联命令）和 `script`（脚本文件路径）两种方式，二选一。脚本文件支持绝对路径；相对路径会优先基于 YAML 所在目录解析，找不到时再基于被二分的仓库目录解析。工具自动设置执行权限并通过 `bash` 执行。
 
 | 字段 | 说明 |
 |------|------|
 | `name` | 场景名称 |
 | `setup_cmd` / `setup_script` | 每个 commit 的安装命令/脚本 |
+| `setup_timeout` | 安装超时(秒), 默认 600 |
 | `server.start_cmd` / `server.start_script` | vLLM 启动命令/脚本 (脚本内含环境变量和参数) |
 | `server.stop_cmd` / `server.stop_script` | vLLM 停止命令/脚本 (可选, 默认 kill 进程) |
 | `server.ready_keyword` | 日志关键字检测就绪 (推荐, 如 `"Uvicorn running on"`) |
 | `server.health_endpoint` | HTTP 健康检查路径 (与 ready_keyword 二选一, 默认 `/health`) |
-| `server.port` | 服务端口 |
+| `server.host` / `server.port` | 服务绑定地址和端口 |
+| `server.client_host` | curl/aisbench 访问地址; 未配置时使用 `host`, `0.0.0.0` 会自动转为 `127.0.0.1` |
+| `server.verify_with_curl` | 使用日志关键字判定就绪后, 是否继续 curl `health_endpoint` 验证, 默认 true |
 | `server.ready_timeout` | 等待就绪超时(秒) |
 | `server.env` | 额外环境变量 (如 `ASCEND_RT_VISIBLE_DEVICES`) |
 | `benchmarks[].cmd` / `benchmarks[].script` | 验证命令/脚本 |
@@ -232,6 +236,7 @@ benchmark 脚本/命令中可使用以下环境变量：
 |------|------|
 | `$VLLM_BASE_URL` | `http://127.0.0.1:8000` |
 | `$VLLM_HOST` | `127.0.0.1` |
+| `$VLLM_BIND_HOST` | 服务绑定地址, 如 `0.0.0.0` |
 | `$VLLM_PORT` | `8000` |
 | `$BISECT_REPO_DIR` | 仓库目录 |
 
@@ -241,7 +246,7 @@ benchmark 脚本/命令中可使用以下环境变量：
 python run_bisect.py \
     --repo-dir ./vllm-ascend \
     --good v0.7.0 --bad main \
-    --cmd "python test_runner.py --config scenes/my_scene.yaml" \
+    --config scenes/my_scene.yaml \
     --analyze \
     --error-description "LLaMA推理在910B上精度下降"
 ```
@@ -253,8 +258,7 @@ python run_bisect.py \
 | `--repo-dir` | 是 | vllm-ascend 本地仓库路径 |
 | `--good` | 是 | 已知正常的 commit/tag |
 | `--bad` | 是 | 已知异常的 commit/tag |
-| `--test-script` | 二选一 | 测试脚本文件路径 |
-| `--cmd` | 二选一 | 内联测试命令 |
+| `--config` / `--test-script` / `--cmd` | 三选一 | 场景 YAML、测试脚本文件路径、内联测试命令 |
 | `--setup-script` | 否 | 每轮的环境安装脚本 |
 | `--setup-cmd` | 否 | 每轮的环境安装命令 |
 | `--timeout` | 否 | 每轮超时秒数 (默认 600) |

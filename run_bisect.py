@@ -12,7 +12,7 @@ Usage:
     python run_bisect.py \
         --repo-dir ./vllm-ascend \
         --good v0.7.0 --bad main \
-        --test-script ./dev_test.sh \
+        --config scenes/my_scene.yaml \
         [--setup-cmd "pip install -e . -q"] \
         [--analyze]
 """
@@ -21,10 +21,11 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import sys
 from dataclasses import asdict
 
-from bisect_pr import bisect, resolve_ref, run_git, run_test_at_commit
+from bisect_pr import bisect, build_scene_test_cmd, resolve_ref, run_git, run_test_at_commit
 from agent_analyzer import analyze_with_claude, fetch_pr_info, generate_report
 
 logging.basicConfig(
@@ -42,6 +43,7 @@ def main():
     parser.add_argument("--bad", required=True, help="已知异常的 commit/tag")
 
     test_group = parser.add_mutually_exclusive_group(required=True)
+    test_group.add_argument("--config", help="场景配置 YAML 文件")
     test_group.add_argument("--test-script", help="开发提供的测试脚本文件")
     test_group.add_argument("--cmd", help="内联测试命令")
 
@@ -64,9 +66,16 @@ def main():
     log_dir = os.path.join(os.path.abspath(args.output_dir), "bisect_logs")
 
     # 解析 test/setup 命令
-    if args.test_script:
+    if args.config:
+        config_path = os.path.abspath(args.config)
+        if not os.path.isfile(config_path):
+            log.error("场景配置不存在: %s", config_path)
+            sys.exit(1)
+        test_cmd = build_scene_test_cmd(config_path, repo_dir)
+    elif args.test_script:
         test_cmd = os.path.abspath(args.test_script)
         os.chmod(test_cmd, 0o755)
+        test_cmd = f"bash {shlex.quote(test_cmd)}"
     else:
         test_cmd = args.cmd
 
@@ -74,6 +83,7 @@ def main():
     if args.setup_script:
         setup_cmd = os.path.abspath(args.setup_script)
         os.chmod(setup_cmd, 0o755)
+        setup_cmd = f"bash {shlex.quote(setup_cmd)}"
     elif args.setup_cmd:
         setup_cmd = args.setup_cmd
 

@@ -8,7 +8,7 @@
 #   python bisect_pr.py \
 #       --repo-dir ./vllm-ascend \
 #       --good v0.7.0 --bad main \
-#       --cmd "python test_runner.py --config scenes/example_script_mode.yaml"
+#       --config scenes/example_script_mode.yaml
 # ============================================================
 
 name: glm5_w4a8_validation
@@ -16,6 +16,7 @@ description: "GLM5-w4a8 16卡推理精度+性能验证"
 
 # ── 安装脚本 (每个 commit 都会重新安装) ──
 setup_script: ./scripts/setup.sh
+setup_timeout: 1200
 
 # ── vLLM 服务 ──
 server:
@@ -25,8 +26,11 @@ server:
   # 通过日志关键字判断服务就绪 (推荐)
   # vllm 启动完成后会打印类似 "Uvicorn running on http://0.0.0.0:8077" 的日志
   ready_keyword: "Uvicorn running on"
+  verify_with_curl: true
 
   host: 0.0.0.0
+  # curl/aisbench 访问地址; host=0.0.0.0 时未配置也会自动使用 127.0.0.1
+  client_host: 127.0.0.1
   port: 8077
   ready_timeout: 600       # 大模型加载慢, 给 10 分钟
 

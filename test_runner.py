@@ -14,11 +14,11 @@ vllm-ascend 多阶段测试运行器。
 开发通过 YAML 配置文件描述场景, 无需编写复杂脚本。
 
 Usage:
-    # 作为 bisect 的 test-script 使用
+    # 作为 bisect 的场景配置使用
     python bisect_pr.py \
         --repo-dir ./vllm-ascend \
         --good v0.7.0 --bad main \
-        --test-script "python test_runner.py --config scene.yaml"
+        --config scene.yaml
 
     # 单独运行验证
     python test_runner.py --config scene.yaml [--repo-dir ./vllm-ascend]
@@ -54,6 +54,7 @@ class ServerConfig:
     start_cmd: str = ""             # 启动命令 (与 start_script 二选一)
     start_script: str = ""          # 启动脚本文件路径, 如 "./start_vllm.sh"
     host: str = "127.0.0.1"
+    client_host: str = ""                    # curl/benchmark 访问服务使用的地址
     port: int = 8000
     # 就绪检测方式 (二选一):
     #   1. ready_keyword: 监控服务日志, 出现关键字即就绪 (推荐, 如 "Uvicorn running on")
@@ -62,6 +63,7 @@ class ServerConfig:
     health_endpoint: str = "/health"          # HTTP 健康检查路径
     ready_timeout: int = 300                  # 等待服务就绪的超时(秒)
     ready_interval: int = 2                   # 健康检查间隔(秒)
+    verify_with_curl: bool = True             # 日志就绪后再用 curl 验证 HTTP 服务
     stop_cmd: str = ""                        # 自定义停止命令(可选, 默认 kill 进程)
     stop_script: str = ""                     # 自定义停止脚本(可选)
     env: dict = None                          # 额外环境变量
@@ -90,12 +92,16 @@ class SceneConfig:
     benchmarks: list = None                   # 验证列表
     cleanup_cmd: str = ""                     # 清理命令
     cleanup_script: str = ""                  # 清理脚本文件
+    setup_timeout: int = 600                  # 安装超时
+    config_dir: str = ""                      # YAML 所在目录, 用于解析脚本相对路径
 
 
 def load_config(path: str) -> SceneConfig:
     """从 YAML 文件加载场景配置"""
     log.info("[config] Loading scene config from: %s", path)
-    with open(path) as f:
+    config_path = os.path.abspath(path)
+    config_dir = os.path.dirname(config_path)
+    with open(config_path) as f:
         raw = yaml.safe_load(f)
 
     server = None
@@ -107,11 +113,13 @@ def load_config(path: str) -> SceneConfig:
             start_cmd=s.get("start_cmd", ""),
             start_script=s.get("start_script", ""),
             host=s.get("host", "127.0.0.1"),
+            client_host=s.get("client_host", ""),
             port=s.get("port", 8000),
             ready_keyword=s.get("ready_keyword", ""),
             health_endpoint=s.get("health_endpoint", "/health"),
             ready_timeout=s.get("ready_timeout", 300),
             ready_interval=s.get("ready_interval", 2),
+            verify_with_curl=s.get("verify_with_curl", True),
             stop_cmd=s.get("stop_cmd", ""),
             stop_script=s.get("stop_script", ""),
             env=s.get("env"),
@@ -140,6 +148,8 @@ def load_config(path: str) -> SceneConfig:
         benchmarks=benchmarks,
         cleanup_cmd=raw.get("cleanup_cmd", ""),
         cleanup_script=raw.get("cleanup_script", ""),
+        setup_timeout=raw.get("setup_timeout", 600),
+        config_dir=config_dir,
     )
     log.info("[config] Scene: %s (%s)", config.name, config.description or "no description")
     log.info("[config] Setup: %s", config.setup_script or config.setup_cmd or "(none)")
@@ -162,26 +172,29 @@ def load_config(path: str) -> SceneConfig:
 class VllmServer:
     """管理 vLLM 服务的生命周期"""
 
-    def __init__(self, config: ServerConfig, cwd: str):
+    def __init__(self, config: ServerConfig, cwd: str, config_dir: str = ""):
         self.config = config
         self.cwd = cwd
+        self.config_dir = config_dir
         self.process: Optional[subprocess.Popen] = None
         self._log_lines: list[str] = []  # 收集服务日志
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.config.host}:{self.config.port}"
+        return f"http://{self.connect_host}:{self.config.port}"
+
+    @property
+    def connect_host(self) -> str:
+        if self.config.client_host:
+            return self.config.client_host
+        if self.config.host in ("0.0.0.0", "::", "[::]"):
+            return "127.0.0.1"
+        return self.config.host
 
     def _resolve_start_cmd(self) -> str:
         """解析启动脚本/命令, 返回 shell 命令字符串"""
         if self.config.start_script:
-            script = self.config.start_script
-            if not os.path.isabs(script):
-                script = os.path.join(self.cwd, script)
-            script = os.path.abspath(script)
-
-            if not os.path.isfile(script):
-                raise FileNotFoundError(f"启动脚本不存在: {script}")
+            script = _resolve_path(self.config.start_script, self.cwd, self.config_dir)
 
             os.chmod(script, 0o755)
             log.info("[server] Using start script: %s", script)
@@ -193,10 +206,7 @@ class VllmServer:
     def _resolve_stop_cmd(self) -> Optional[str]:
         """解析停止命令/脚本"""
         if self.config.stop_script:
-            script = self.config.stop_script
-            if not os.path.isabs(script):
-                script = os.path.join(self.cwd, script)
-            script = os.path.abspath(script)
+            script = _resolve_path(self.config.stop_script, self.cwd, self.config_dir, must_exist=False)
             if os.path.isfile(script):
                 os.chmod(script, 0o755)
                 log.info("[server] Using stop script: %s", script)
@@ -252,9 +262,11 @@ class VllmServer:
         log.info("[server] Waiting for service ready ...")
 
         if self.config.ready_keyword:
-            return self._wait_ready_by_log()
-        else:
-            return self._wait_ready_by_health()
+            ready = self._wait_ready_by_log()
+            if ready and self.config.verify_with_curl and self.config.health_endpoint:
+                return self._wait_ready_by_health(timeout=60)
+            return ready
+        return self._wait_ready_by_health()
 
     def _wait_ready_by_log(self) -> bool:
         """
@@ -325,10 +337,11 @@ class VllmServer:
             log.error("[vllm]   %s", line)
         return False
 
-    def _wait_ready_by_health(self) -> bool:
+    def _wait_ready_by_health(self, timeout: int | None = None) -> bool:
         """通过 HTTP 健康检查等待就绪"""
         url = f"{self.base_url}{self.config.health_endpoint}"
-        deadline = time.time() + self.config.ready_timeout
+        wait_timeout = timeout or self.config.ready_timeout
+        deadline = time.time() + wait_timeout
         attempt = 0
         start_time = time.time()
 
@@ -366,7 +379,7 @@ class VllmServer:
 
             time.sleep(self.config.ready_interval)
 
-        log.error("[server] Not ready after %ds (%d attempts)", self.config.ready_timeout, attempt)
+        log.error("[server] Not ready after %ds (%d attempts)", wait_timeout, attempt)
         return False
 
     def _stream_logs(self):
@@ -416,14 +429,28 @@ class VllmServer:
         return "\n".join(self._log_lines)
 
 
-def _resolve_script(script_path: str, cwd: str, label: str) -> str:
-    """将脚本路径解析为可执行的 shell 命令, 处理相对路径和权限"""
-    if not os.path.isabs(script_path):
-        script_path = os.path.join(cwd, script_path)
-    script_path = os.path.abspath(script_path)
+def _resolve_path(path: str, cwd: str, config_dir: str = "", must_exist: bool = True) -> str:
+    """Resolve absolute paths, then paths relative to config dir, then repo dir."""
+    if os.path.isabs(path):
+        resolved = os.path.abspath(path)
+    else:
+        candidates = []
+        if config_dir:
+            candidates.append(os.path.abspath(os.path.join(config_dir, path)))
+        candidates.append(os.path.abspath(os.path.join(cwd, path)))
+        resolved = next((p for p in candidates if os.path.exists(p)), candidates[0])
 
-    if not os.path.isfile(script_path):
-        raise FileNotFoundError(f"{label} 脚本不存在: {script_path}")
+    if must_exist and not os.path.isfile(resolved):
+        raise FileNotFoundError(resolved)
+    return resolved
+
+
+def _resolve_script(script_path: str, cwd: str, label: str, config_dir: str = "") -> str:
+    """将脚本路径解析为可执行的 shell 命令, 处理相对路径和权限"""
+    try:
+        script_path = _resolve_path(script_path, cwd, config_dir)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"{label} 脚本不存在: {e}") from e
 
     os.chmod(script_path, 0o755)
     log.info("[%s] Using script: %s", label, script_path)
@@ -433,7 +460,7 @@ def _resolve_script(script_path: str, cwd: str, label: str) -> str:
 # ── Benchmark 执行 ───────────────────────────────────────────────────────────
 
 
-def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
+def run_benchmark(bench: BenchConfig, cwd: str, env: dict, config_dir: str = "") -> dict:
     """
     运行一个 benchmark, 返回:
     {
@@ -447,10 +474,7 @@ def run_benchmark(bench: BenchConfig, cwd: str, env: dict) -> dict:
     # 解析 benchmark 的执行命令
     run_cmd = bench.cmd
     if bench.script:
-        script_path = bench.script
-        if not os.path.isabs(script_path):
-            script_path = os.path.join(cwd, script_path)
-        script_path = os.path.abspath(script_path)
+        script_path = _resolve_path(bench.script, cwd, config_dir, must_exist=False)
         if not os.path.isfile(script_path):
             log.error("[bench] Script not found: %s", script_path)
             return {
@@ -707,7 +731,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
         setup_run_cmd = None
         if config.setup_script:
             try:
-                setup_run_cmd = _resolve_script(config.setup_script, repo_dir, "setup")
+                setup_run_cmd = _resolve_script(config.setup_script, repo_dir, "setup", config.config_dir)
             except FileNotFoundError as e:
                 return False, str(e)
         elif config.setup_cmd:
@@ -732,7 +756,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
             setup_start = time.time()
             proc = subprocess.run(
                 setup_run_cmd, shell=True, cwd=repo_dir, env=env,
-                capture_output=True, text=True, timeout=600,
+                capture_output=True, text=True, timeout=config.setup_timeout,
             )
             setup_elapsed = time.time() - setup_start
 
@@ -755,7 +779,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
         # ── Step 2: Start server ──
         if config.server:
             log.info("[step 2/4] Starting vLLM server ...")
-            server = VllmServer(config.server, cwd=repo_dir)
+            server = VllmServer(config.server, cwd=repo_dir, config_dir=config.config_dir)
             if not server.start():
                 msg = "vLLM server failed to start"
                 log.error("[server] %s", msg)
@@ -763,7 +787,8 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
 
             # 把 server 地址写入环境变量, benchmark 脚本可以用
             env["VLLM_BASE_URL"] = server.base_url
-            env["VLLM_HOST"] = config.server.host
+            env["VLLM_HOST"] = server.connect_host
+            env["VLLM_BIND_HOST"] = config.server.host
             env["VLLM_PORT"] = str(config.server.port)
             log.info("[server] Environment set: VLLM_BASE_URL=%s", server.base_url)
         else:
@@ -776,7 +801,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
 
         for i, bench in enumerate(config.benchmarks, 1):
             log.info("[bench] (%d/%d) Starting: %s", i, len(config.benchmarks), bench.name)
-            result = run_benchmark(bench, cwd=repo_dir, env=env)
+            result = run_benchmark(bench, cwd=repo_dir, env=env, config_dir=config.config_dir)
             results.append(result)
 
             if not result["passed"]:
@@ -808,7 +833,7 @@ def run_scene(config: SceneConfig, repo_dir: str) -> tuple[bool, str]:
         cleanup_run_cmd = None
         if config.cleanup_script:
             try:
-                cleanup_run_cmd = _resolve_script(config.cleanup_script, repo_dir, "cleanup")
+                cleanup_run_cmd = _resolve_script(config.cleanup_script, repo_dir, "cleanup", config.config_dir)
             except FileNotFoundError as e:
                 log.warning("[cleanup] %s", e)
         elif config.cleanup_cmd:
@@ -840,7 +865,7 @@ def main():
     python bisect_pr.py \\
         --repo-dir ./vllm-ascend \\
         --good v0.7.0 --bad main \\
-        --cmd "python test_runner.py --config scene.yaml"
+        --config scene.yaml
 
 单独运行:
     python test_runner.py --config scene.yaml --repo-dir ./vllm-ascend
