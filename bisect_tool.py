@@ -191,39 +191,71 @@ class BisectTool:
             setup_start = time.time()
             
             try:
-                result = subprocess.run(
+                # 实时显示setup输出（不使用capture_output，直接流式输出）
+                process = subprocess.Popen(
                     ['bash', script], cwd=repo_path, env=env,
-                    capture_output=True, text=True, timeout=600
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True
                 )
+                
+                # 实时读取stdout和stderr
+                stdout_lines = []
+                stderr_lines = []
+                
+                import select
+                while process.poll() is None:
+                    # 检查是否有输出可读
+                    ready_fds, _, _ = select.select([process.stdout, process.stderr], [], [], 1.0)
+                    
+                    for fd in ready_fds:
+                        if fd == process.stdout:
+                            line = process.stdout.readline()
+                            if line:
+                                line = line.rstrip()
+                                stdout_lines.append(line)
+                                log.info(f"[setup] {line}")
+                        elif fd == process.stderr:
+                            line = process.stderr.readline()
+                            if line:
+                                line = line.rstrip()
+                                stderr_lines.append(line)
+                                log.warning(f"[setup-err] {line}")
+                    
+                    # 定期显示进度（每10秒）
+                    elapsed = time.time() - setup_start
+                    if int(elapsed) % 10 == 0 and int(elapsed) > 0:
+                        remaining = max(0, 600 - elapsed)
+                        log.info(f"[setup] Still running... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)")
+                
+                # 读取剩余输出
+                remaining_stdout = process.stdout.read()
+                remaining_stderr = process.stderr.read()
+                if remaining_stdout:
+                    for line in remaining_stdout.strip().splitlines():
+                        stdout_lines.append(line)
+                        log.info(f"[setup] {line}")
+                if remaining_stderr:
+                    for line in remaining_stderr.strip().splitlines():
+                        stderr_lines.append(line)
+                        log.warning(f"[setup-err] {line}")
                 
                 setup_elapsed = time.time() - setup_start
                 
-                # 打印setup输出（关键信息）
-                if result.stdout:
-                    log.info("── Setup stdout (last 30 lines) ──")
-                    for line in result.stdout.strip().splitlines()[-30:]:
-                        log.info(f"  {line}")
-                
-                if result.returncode != 0:
+                if process.returncode != 0:
                     log.error("="*60)
-                    log.error(f"Setup FAILED (exit code {result.returncode}) after {setup_elapsed:.1f}s")
+                    log.error(f"Setup FAILED (exit code {process.returncode}) after {setup_elapsed:.1f}s")
                     log.error("="*60)
-                    
-                    if result.stderr:
-                        log.error("── Setup stderr ──")
-                        for line in result.stderr.strip().splitlines()[-20:]:
-                            log.error(f"  {line}")
                     
                     # 保存完整setup日志
                     setup_log_file = Path(self.log_dir) / f"setup_fail_{commit_short}.log"
                     with open(setup_log_file, 'w') as f:
                         f.write(f"Setup failed at commit {commit_short}\n")
-                        f.write(f"Exit code: {result.returncode}\n")
+                        f.write(f"Exit code: {process.returncode}\n")
                         f.write(f"Duration: {setup_elapsed:.1f}s\n")
                         f.write("\n=== STDOUT ===\n")
-                        f.write(result.stdout)
+                        f.write('\n'.join(stdout_lines))
                         f.write("\n=== STDERR ===\n")
-                        f.write(result.stderr)
+                        f.write('\n'.join(stderr_lines))
                     log.error(f"Full setup log saved: {setup_log_file}")
                     
                     return "fail"
@@ -238,6 +270,8 @@ class BisectTool:
                 log.error("="*60)
                 log.error(f"Setup TIMEOUT after {setup_elapsed:.1f}s (limit 600s)")
                 log.error("="*60)
+                if process:
+                    process.kill()
                 return "fail"
         else:
             log.info("="*60)
