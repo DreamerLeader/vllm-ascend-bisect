@@ -111,21 +111,29 @@ def setup():
             capture_output=True, text=True, timeout=600
         )
         
-        for line in result.stdout.splitlines()[-50:]:
+        # 收集setup日志
+        stdout_last_50 = result.stdout.strip().splitlines()[-50:]
+        stderr_last_20 = result.stderr.strip().splitlines()[-20:] if result.stderr else []
+        
+        for line in stdout_last_50:
             add_log('setup', line)
-        if result.stderr:
-            for line in result.stderr.splitlines()[-20:]:
-                add_log('setup-stderr', line)
+        for line in stderr_last_20:
+            add_log('setup-stderr', line)
         
         if result.returncode != 0:
             add_log('setup', f"FAILED (exit {result.returncode})")
             return jsonify({
                 "status": "fail",
-                "error": result.stderr[-500:]
+                "error": result.stderr[-500:] if result.stderr else "unknown error",
+                "stdout": '\n'.join(stdout_last_50),
+                "stderr": '\n'.join(stderr_last_20)
             }), 500
         
         add_log('setup', "SUCCESS")
-        return jsonify({"status": "ok"})
+        return jsonify({
+            "status": "ok",
+            "stdout": '\n'.join(stdout_last_50)
+        })
         
     except subprocess.TimeoutExpired:
         add_log('setup', "TIMEOUT")

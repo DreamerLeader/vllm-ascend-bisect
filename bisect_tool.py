@@ -165,13 +165,15 @@ class BisectTool:
             return True
     
     def setup_all_nodes(self):
-        """执行安装脚本"""
+        """执行安装脚本（增强日志输出）"""
         if self.mode == "single_node":
             node = self.nodes[0]
             script = self.resolve_script_path(node['scripts']['setup'])
             repo_path = self.get_repo_path()
             
+            log.info("="*60)
             log.info(f"Running setup script: {script}")
+            log.info("="*60)
             
             env = os.environ.copy()
             env['BISECT_REPO_DIR'] = repo_path
@@ -180,27 +182,73 @@ class BisectTool:
                 timeout=5
             ).decode().strip()
             
+            commit_short = subprocess.check_output(
+                ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
+                timeout=5
+            ).decode().strip()
+            log.info(f"Setup at commit: {commit_short}")
+            
+            setup_start = time.time()
+            
             try:
                 result = subprocess.run(
                     ['bash', script], cwd=repo_path, env=env,
                     capture_output=True, text=True, timeout=600
                 )
                 
+                setup_elapsed = time.time() - setup_start
+                
+                # 打印setup输出（关键信息）
+                if result.stdout:
+                    log.info("── Setup stdout (last 30 lines) ──")
+                    for line in result.stdout.strip().splitlines()[-30:]:
+                        log.info(f"  {line}")
+                
                 if result.returncode != 0:
-                    log.error(f"Setup failed (exit {result.returncode})")
-                    log.error(f"Error: {result.stderr[-300:]}")
+                    log.error("="*60)
+                    log.error(f"Setup FAILED (exit code {result.returncode}) after {setup_elapsed:.1f}s")
+                    log.error("="*60)
+                    
+                    if result.stderr:
+                        log.error("── Setup stderr ──")
+                        for line in result.stderr.strip().splitlines()[-20:]:
+                            log.error(f"  {line}")
+                    
+                    # 保存完整setup日志
+                    setup_log_file = Path(self.log_dir) / f"setup_fail_{commit_short}.log"
+                    with open(setup_log_file, 'w') as f:
+                        f.write(f"Setup failed at commit {commit_short}\n")
+                        f.write(f"Exit code: {result.returncode}\n")
+                        f.write(f"Duration: {setup_elapsed:.1f}s\n")
+                        f.write("\n=== STDOUT ===\n")
+                        f.write(result.stdout)
+                        f.write("\n=== STDERR ===\n")
+                        f.write(result.stderr)
+                    log.error(f"Full setup log saved: {setup_log_file}")
+                    
                     return "fail"
                 
-                log.info("Setup completed successfully")
+                log.info("="*60)
+                log.info(f"Setup SUCCESS ({setup_elapsed:.1f}s)")
+                log.info("="*60)
                 return "ok"
+                
             except subprocess.TimeoutExpired:
-                log.error("Setup timeout")
+                setup_elapsed = time.time() - setup_start
+                log.error("="*60)
+                log.error(f"Setup TIMEOUT after {setup_elapsed:.1f}s (limit 600s)")
+                log.error("="*60)
                 return "fail"
         else:
+            log.info("="*60)
             log.info("Running setup on all nodes...")
+            log.info("="*60)
+            
             for node in self.nodes:
                 agent_url = f"http://{node['agent']['host']}:{node['agent']['port']}"
                 timeout = node['agent'].get('timeout', 30)
+                
+                log.info(f"\n── Setup on {node['name']} ({node['role']}) ──")
                 
                 try:
                     response = requests.post(
@@ -210,16 +258,34 @@ class BisectTool:
                     )
                     result = response.json()
                     
+                    # 显示Agent返回的setup输出
+                    if result.get('stdout'):
+                        log.info("Setup stdout:")
+                        for line in result['stdout'].strip().splitlines()[-20:]:
+                            log.info(f"  {line}")
+                    
                     if result['status'] != 'ok':
+                        log.error("="*60)
                         log.error(f"Setup FAILED on {node['name']}")
+                        log.error("="*60)
+                        
+                        if result.get('stderr'):
+                            log.error("Setup stderr:")
+                            for line in result['stderr'].strip().splitlines()[-20:]:
+                                log.error(f"  {line}")
+                        
                         log.error(f"Error: {result.get('error', 'unknown')}")
                         return "fail"
+                    
+                    log.info(f"✓ Setup SUCCESS on {node['name']}")
                         
                 except Exception as e:
                     log.error(f"Setup error on {node['name']}: {e}")
                     return "fail"
             
+            log.info("="*60)
             log.info("Setup SUCCESS on all nodes")
+            log.info("="*60)
             return "ok"
     
     def start_services(self):
