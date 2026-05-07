@@ -1,0 +1,64 @@
+# ============================================================
+# 单机混部配置模板 - 最简单、最常用（80%场景）
+# ============================================================
+
+name: llama_single_node
+description: "LLaMA推理 - 单机混部场景"
+
+# Git仓库配置
+repo:
+  url: https://github.com/vllm-project/vllm-ascend.git
+  local_path: ./vllm-ascend      # 相对路径（相对于配置文件夹）
+
+# 二分范围
+bisect_range:
+  good_commit: "v0.7.0"
+  bad_commit: "main"
+
+# ── 单机混部：只有1个节点 ──
+nodes:
+  - name: single_node
+    role: all                    # 单机混部标识
+    
+    agent:
+      host: 127.0.0.1            # 本机（工具自动启动Agent）
+      port: 8080
+      
+    service:
+      host: 127.0.0.1            # vLLM服务地址
+      port: 8000
+      health_endpoint: /health
+      
+    scripts:
+      # 所有脚本使用相对路径（相对于配置文件夹）
+      setup: ./scripts/setup.sh
+      start: ./scripts/start.sh   # 单机混部用start.sh
+      stop: ./scripts/stop.sh
+
+# 验证任务
+benchmarks:
+  - name: accuracy_check
+    script: ./scripts/accuracy.sh
+    timeout: 600
+    result_file: /tmp/accuracy_result.json
+    check:
+      accuracy: ">= 0.95"
+      
+  - name: performance_check
+    script: ./scripts/performance.sh
+    timeout: 600
+    result_file: /tmp/perf_result.json
+    check:
+      throughput: ">= 100"
+
+# 二分参数
+bisect_options:
+  skip_verify: false
+  health_check_timeout: 300
+  health_check_interval: 5
+
+# 日志配置
+log:
+  output_dir: bisect_logs
+  collect_on_failure: true
+  max_log_lines: 100

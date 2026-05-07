@@ -1,0 +1,83 @@
+# ============================================================
+# pd分离配置模板 - 扩展支持（20%场景）
+# ============================================================
+
+name: llama_pd_separated
+description: "LLaMA推理 - pd分离部署"
+
+# Git仓库配置
+repo:
+  url: https://github.com/vllm-project/vllm-ascend.git
+  local_path: /home/user/vllm-ascend  # 绝对路径（各机器统一）
+
+# 二分范围
+bisect_range:
+  good_commit: "v0.7.0"
+  bad_commit: "main"
+
+# ── pd分离：多个节点 ──
+nodes:
+  - name: p_node
+    role: p                      # p角色
+    
+    agent:
+      host: 192.168.1.10         # Agent服务地址（需手动启动）
+      port: 8080
+      timeout: 30
+      
+    service:
+      host: 192.168.1.10         # vLLM服务地址
+      port: 8000
+      health_endpoint: /health
+      
+    scripts:
+      # pd分离使用绝对路径（各机器上的脚本位置）
+      setup: /home/user/scripts/setup.sh
+      start: /home/user/scripts/start_p.sh  # p节点用start_p.sh
+      stop: /home/user/scripts/stop.sh
+      
+  - name: d_node
+    role: d                      # d角色
+    
+    agent:
+      host: 192.168.1.11
+      port: 8080
+      timeout: 30
+      
+    service:
+      host: 192.168.1.11
+      port: 8000
+      health_endpoint: /health
+      
+    scripts:
+      setup: /home/user/scripts/setup.sh
+      start: /home/user/scripts/start_d.sh  # d节点用start_d.sh
+      stop: /home/user/scripts/stop.sh
+
+# 验证任务
+benchmarks:
+  - name: accuracy_check
+    script: ./scripts/accuracy.sh  # 验证脚本可以用相对路径
+    timeout: 600
+    result_file: /tmp/accuracy_result.json
+    check:
+      accuracy: ">= 0.95"
+      
+  - name: performance_check
+    script: ./scripts/performance.sh
+    timeout: 600
+    result_file: /tmp/perf_result.json
+    check:
+      throughput: ">= 100"
+
+# 二分参数
+bisect_options:
+  skip_verify: false
+  health_check_timeout: 300
+  health_check_interval: 5
+
+# 日志配置
+log:
+  output_dir: bisect_logs
+  collect_on_failure: true
+  max_log_lines: 100
