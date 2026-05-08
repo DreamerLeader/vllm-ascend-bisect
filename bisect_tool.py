@@ -411,72 +411,36 @@ class BisectTool:
                 return "fail"
     
     def start_services(self):
-        """启动所有节点的服务（详细日志写入文件，终端显示进度）"""
+        """启动服务（简化：Agent只执行脚本，不管理生命周期）"""
         if self.mode == "single_node":
             node = self.nodes[0]
             script = self.resolve_script_path(node['scripts']['start'])
             repo_path = self.get_repo_path()
             
-            commit_short = subprocess.check_output(
-                ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
-                timeout=5
-            ).decode().strip()
-            
-            # 创建服务日志文件
-            service_log_file = Path(self.log_dir) / f"service_{commit_short}.log"
-            
             log.info("="*60)
             log.info("Starting vLLM service...")
-            log.info(f"  Full logs: {service_log_file}")
+            log.info(f"  Script: {script}")
             log.info("="*60)
             
             env = os.environ.copy()
             env['BISECT_REPO_DIR'] = repo_path
             
             try:
-                process = subprocess.Popen(
+                # 执行启动脚本（后台运行，不等待，不管理进程）
+                subprocess.Popen(
                     ['bash', script], cwd=repo_path, env=env,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    preexec_fn=os.setsid,
-                    text=True
+                    stdout=subprocess.DEVNULL,  # 不收集stdout
+                    stderr=subprocess.DEVNULL,  # 不收集stderr
+                    preexec_fn=os.setsid
                 )
                 
-                log.info(f"Service started (PID {process.pid})")
+                log.info("✓ Start script executed (background process)")
+                log.info(f"  Service URL: http://{node['service']['host']}:{node['service']['port']}")
+                log.info("  Waiting for service ready (health check)...")
                 
-                # 启动后台线程实时读取服务日志并写入文件
-                import threading
+                # 不返回任何进程信息（Agent不管理生命周期）
+                return {"status": "started"}
                 
-                service_logs = []
-                service_log_file_obj = open(service_log_file, 'w')
-                service_log_file_obj.write(f"Service started at {datetime.now().isoformat()}\n")
-                service_log_file_obj.write(f"Commit: {commit_short}\n")
-                service_log_file_obj.write(f"PID: {process.pid}\n")
-                service_log_file_obj.write("="*60 + "\n\n")
-                
-                def monitor_service_logs():
-                    """后台线程：实时读取服务stdout并写入文件"""
-                    try:
-                        for raw_line in iter(process.stdout.readline, ""):
-                            if raw_line:
-                                line = raw_line.rstrip()
-                                service_logs.append(line)
-                                service_log_file_obj.write(f"{line}\n")
-                                service_log_file_obj.flush()
-                    except:
-                        pass
-                
-                monitor_thread = threading.Thread(target=monitor_service_logs, daemon=True)
-                monitor_thread.start()
-                
-                # 返回服务信息
-                return {
-                    "single_node": process.pid,
-                    "process": process,
-                    "monitor_thread": monitor_thread,
-                    "service_logs": service_logs,
-                    "service_log_file": service_log_file,
-                    "service_log_file_obj": service_log_file_obj
-                }
             except Exception as e:
                 log.error(f"✗ Start failed: {e}")
                 return None
@@ -512,16 +476,13 @@ class BisectTool:
             return pids
     
     def wait_services_ready(self, service_info=None):
-        """等待所有服务就绪（显示实时服务日志）"""
+        """等待服务就绪（简化：只做curl健康检查）"""
         log.info("="*60)
         log.info("Waiting for vLLM service to be ready...")
         log.info("="*60)
         
         timeout = self.config['bisect_options']['health_check_timeout']
         interval = self.config['bisect_options']['health_check_interval']
-        
-        # 初始化日志追踪变量（避免作用域问题）
-        last_log_count = 0
         
         for node in self.nodes:
             service_url = f"http://{node['service']['host']}:{node['service']['port']}"
@@ -535,40 +496,13 @@ class BisectTool:
             while time.time() < deadline:
                 attempt += 1
                 
-                # 单机模式：显示新日志（直接从service_info获取）
-                if self.mode == "single_node" and service_info and "service_logs" in service_info:
-                    current_logs = service_info["service_logs"]
-                    if len(current_logs) > last_log_count:
-                        new_logs = current_logs[last_log_count:]
-                        for log_line in new_logs[-10:]:  # 显示最近10条新日志
-                            log.info(f"[vllm] {log_line}")
-                        last_log_count = len(current_logs)
-                
-                # 检查服务进程是否意外退出
-                if self.mode == "single_node" and service_info:
-                    process = service_info.get("process")
-                    if process and process.poll() is not None:
-                        log.error("="*60)
-                        log.error(f"Service process exited prematurely (exit code {process.returncode})")
-                        log.error("="*60)
-                        # 显示最后的服务日志
-                        if service_info.get("service_logs"):
-                            log.error("Last 20 lines of service logs:")
-                            for log_line in service_info["service_logs"][-20:]:
-                                log.error(f"  {log_line}")
-                        return False
-                
+                # 只做HTTP健康检查（curl判断）
                 try:
                     response = requests.get(url, timeout=2)
                     if response.status_code == 200:
                         log.info("="*60)
-                        log.info(f"✓ Service READY! (after {attempt} checks)")
+                        log.info(f"✓ Service READY! (after {attempt} checks, {time.time() - (deadline - timeout):.1f}s)")
                         log.info("="*60)
-                        # 显示服务就绪时的关键日志
-                        if self.mode == "single_node" and service_info and service_info.get("service_logs"):
-                            log.info("Service startup logs (last 10 lines):")
-                            for log_line in service_info["service_logs"][-10:]:
-                                log.info(f"  {log_line}")
                         return True
                 except:
                     pass
@@ -578,21 +512,12 @@ class BisectTool:
                     elapsed = time.time() - (deadline - timeout)
                     remaining = deadline - time.time()
                     log.info(f"Still waiting... (attempt {attempt}, {elapsed:.0f}s elapsed, {remaining:.0f}s remaining)")
-                    if self.mode == "single_node" and service_info and service_info.get("service_logs"):
-                        log.info(f"  Service logs collected: {len(service_info['service_logs'])} lines")
                 
                 time.sleep(interval)
             
             log.error("="*60)
             log.error(f"✗ Service NOT READY after {timeout}s ({attempt} attempts)")
             log.error("="*60)
-            
-            # 显示失败时的服务日志
-            if self.mode == "single_node" and service_info and service_info.get("service_logs"):
-                log.error("Last 20 lines of service logs:")
-                for log_line in service_info["service_logs"][-20:]:
-                    log.error(f"  {log_line}")
-            
             return False
         
         return True
@@ -719,54 +644,24 @@ class BisectTool:
         return str(value) == condition.strip()
     
     def stop_all_nodes(self, service_info=None):
-        """停止所有节点（关闭日志文件，显示摘要）"""
+        """停止服务（简化：只执行stop脚本）"""
         log.info("="*60)
         log.info("Stopping vLLM service...")
         log.info("="*60)
         
-        if self.mode == "single_node" and service_info:
-            # 关闭服务日志文件
-            if service_info.get("service_log_file_obj"):
-                log_file_obj = service_info["service_log_file_obj"]
-                log_file_obj.write("\n" + "="*60 + "\n")
-                log_file_obj.write(f"Service stopped at {datetime.now().isoformat()}\n")
-                log_file_obj.write(f"Total logs: {len(service_info.get('service_logs', []))} lines\n")
-                log_file_obj.close()
-                log.info(f"Service logs saved: {service_info['service_log_file']}")
-            
-            # 停止进程
-            pid = service_info.get("single_node")
-            process = service_info.get("process")
-            
-            if pid:
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                    log.info(f"Sent SIGTERM to process group (PID {pid})")
-                    # 等待进程优雅退出
-                    if process:
-                        try:
-                            process.wait(timeout=15)
-                            log.info("✓ Service stopped gracefully")
-                        except subprocess.TimeoutExpired:
-                            log.warning("SIGTERM timeout, sending SIGKILL...")
-                            try:
-                                os.killpg(os.getpgid(pid), signal.SIGKILL)
-                                log.info("✓ Service killed with SIGKILL")
-                            except ProcessLookupError:
-                                log.info("Process already exited")
-                except ProcessLookupError:
-                    log.info("Process not found (already stopped)")
-            
-            # 执行停止脚本（可选）
+        if self.mode == "single_node":
+            # 执行停止脚本（清理服务）
             node = self.nodes[0]
             stop_script = self.resolve_script_path(node['scripts']['stop'])
+            
             try:
                 subprocess.run(['bash', stop_script], timeout=30, capture_output=True)
-            except:
-                pass
-                
+                log.info("✓ Stop script executed")
+            except Exception as e:
+                log.warning(f"Stop script error: {e}")
+            
             log.info("="*60)
-            log.info("✓ Service stopped")
+            log.info("✓ Service stopped (stop.sh completed)")
             log.info("="*60)
         else:
             for node in self.nodes:
