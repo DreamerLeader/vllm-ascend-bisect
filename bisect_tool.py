@@ -587,7 +587,7 @@ bash {script}
                 except Exception as e:
                     log.warning(f"Failed to collect logs from {node['name']}: {e}")
     
-def run_benchmarks(self):
+    def run_benchmarks(self):
         """运行验证任务（日志保存到文件，支持output文件夹）"""
         log.info("="*60)
         log.info("Running benchmarks...")
