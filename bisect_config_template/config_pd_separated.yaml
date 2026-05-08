@@ -57,16 +57,18 @@ nodes:
 # 验证任务
 benchmarks:
   - name: accuracy_check
-    script: ./scripts/accuracy.sh  # 验证脚本可以用相对路径
+    enable: true                      # 可选：false则跳过
+    script: ./scripts/accuracy.sh
     timeout: 600
-    result_file: /tmp/accuracy_result.json
+    result_file: ./output/accuracy_result.json  # 相对路径
     check:
       accuracy: ">= 0.95"
       
   - name: performance_check
+    enable: false                     # 只验证精度示例
     script: ./scripts/performance.sh
     timeout: 600
-    result_file: /tmp/perf_result.json
+    result_file: ./output/perf_result.json
     check:
       throughput: ">= 100"
 

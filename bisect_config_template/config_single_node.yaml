@@ -35,19 +35,21 @@ nodes:
       start: ./scripts/start.sh   # 单机混部用start.sh
       stop: ./scripts/stop.sh
 
-# 验证任务
+# 验证任务（可以只配置精度或只配置性能）
 benchmarks:
   - name: accuracy_check
+    enable: true                      # 可选：false则跳过
     script: ./scripts/accuracy.sh
     timeout: 600
-    result_file: /tmp/accuracy_result.json
+    result_file: ./output/accuracy_result.json  # 相对路径：output文件夹
     check:
       accuracy: ">= 0.95"
       
   - name: performance_check
+    enable: true                      # 可选：false则跳过
     script: ./scripts/performance.sh
     timeout: 600
-    result_file: /tmp/perf_result.json
+    result_file: ./output/perf_result.json
     check:
       throughput: ">= 100"
 

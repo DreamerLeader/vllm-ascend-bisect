@@ -587,11 +587,22 @@ bash {script}
                 except Exception as e:
                     log.warning(f"Failed to collect logs from {node['name']}: {e}")
     
-    def run_benchmarks(self):
-        """运行验证任务"""
+def run_benchmarks(self):
+        """运行验证任务（日志保存到文件，支持output文件夹）"""
+        log.info("="*60)
         log.info("Running benchmarks...")
+        log.info("="*60)
+        
         all_passed = True
         
+        # 获取当前commit（用于日志文件名）
+        repo_path = self.get_repo_path()
+        commit_short = subprocess.check_output(
+            ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
+            timeout=5
+        ).decode().strip()
+        
+        # 设置环境变量（供脚本使用）
         env = os.environ.copy()
         if self.nodes:
             first_node = self.nodes[0]
@@ -599,38 +610,106 @@ bash {script}
             env['VLLM_PORT'] = str(first_node['service']['port'])
         
         for bench in self.config['benchmarks']:
+            # 检查是否启用（可选配置）
+            if bench.get('enable') is False:
+                log.info(f"Skipping {bench['name']} (disabled)")
+                continue
+            
             log.info(f"\n── Benchmark: {bench['name']} ──")
             
             script_path = self.resolve_script_path(bench['script'])
             
+            # 创建benchmark日志文件
+            bench_log_file = Path(self.log_dir) / f"benchmark_{bench['name']}_{commit_short}.log"
+            
+            log.info(f"  Script: {script_path}")
+            log.info(f"  Logs: {bench_log_file}")
+            
+            bench_start = time.time()
+            
             try:
+                # 执行benchmark脚本，保存日志
                 result = subprocess.run(
                     ['bash', script_path],
                     env=env,
                     capture_output=True, text=True,
                     timeout=bench['timeout'],
-                    cwd=self.config_dir
+                    cwd=self.config_dir  # 在配置文件夹运行（output文件夹在这里）
                 )
                 
+                bench_elapsed = time.time() - bench_start
+                
+                # 保存完整日志到文件
+                with open(bench_log_file, 'w') as f:
+                    f.write(f"Benchmark: {bench['name']}\n")
+                    f.write(f"Commit: {commit_short}\n")
+                    f.write(f"Script: {script_path}\n")
+                    f.write(f"Timeout: {bench['timeout']}s\n")
+                    f.write(f"Duration: {bench_elapsed:.1f}s\n")
+                    f.write(f"Exit code: {result.returncode}\n")
+                    f.write("\n" + "="*60 + "\n")
+                    f.write("STDOUT:\n")
+                    f.write(result.stdout)
+                    f.write("\n" + "="*60 + "\n")
+                    f.write("STDERR:\n")
+                    f.write(result.stderr)
+                    f.write("\n" + "="*60 + "\n")
+                
+                log.info(f"  Duration: {bench_elapsed:.1f}s")
+                log.info(f"  Exit code: {result.returncode}")
+                
+                if result.returncode != 0:
+                    log.warning(f"  ⚠ Benchmark exited with non-zero code")
+                    # 显示stderr摘要
+                    if result.stderr:
+                        log.warning(f"  stderr tail: {result.stderr[-200:]}")
+                
+                # 解析结果文件
                 result_file = bench['result_file']
-                if os.path.isfile(result_file):
-                    with open(result_file) as f:
+                
+                # 支持相对路径（output文件夹）
+                if result_file.startswith('./') or not result_file.startswith('/'):
+                    # 相对路径基于config_dir（脚本运行目录）
+                    result_file_abs = self.config_dir / result_file
+                else:
+                    result_file_abs = Path(result_file)
+                
+                if result_file_abs.exists():
+                    with open(result_file_abs) as f:
                         data = json.load(f)
                     
+                    log.info(f"  Result file: {result_file_abs}")
+                    
+                    # 校验阈值
                     passed = self.check_threshold(data, bench['check'])
-                    log.info(f"{bench['name']}: {'PASS' if passed else 'FAIL'}")
+                    
+                    log.info(f"  Status: {'PASS' if passed else 'FAIL'}")
                     
                     if not passed:
                         all_passed = False
-                        log.warning(f"  Check failed: {bench['check']}")
-                        log.warning(f"  Actual: {data}")
+                        log.warning(f"  ⚠ Check failed: {bench['check']}")
+                        log.warning(f"  Actual result: {data}")
                 else:
-                    log.error(f"Result file not found: {result_file}")
+                    log.error(f"  ✗ Result file not found: {result_file_abs}")
+                    log.error(f"    Expected location: output folder in config directory")
                     all_passed = False
                     
             except subprocess.TimeoutExpired:
-                log.error(f"Benchmark {bench['name']} TIMEOUT")
+                bench_elapsed = time.time() - bench_start
+                log.error(f"  ✗ TIMEOUT after {bench_elapsed:.1f}s (limit {bench['timeout']}s)")
+                
+                # 保存超时日志
+                with open(bench_log_file, 'w') as f:
+                    f.write(f"Benchmark: {bench['name']}\n")
+                    f.write(f"Status: TIMEOUT\n")
+                    f.write(f"Timeout limit: {bench['timeout']}s\n")
+                    f.write(f"Actual duration: {bench_elapsed:.1f}s\n")
+                
                 all_passed = False
+        
+        log.info("="*60)
+        log.info(f"Benchmarks completed: {'ALL PASS' if all_passed else 'FAILED'}")
+        log.info("="*60)
         
         return all_passed
     
