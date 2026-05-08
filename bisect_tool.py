@@ -21,10 +21,70 @@ import argparse, json, yaml, requests, subprocess, time, logging, os, signal
 from pathlib import Path
 from datetime import datetime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
-)
+# ── 日志配置：终端简洁 + 文件详细 ──
+def setup_logging(log_dir):
+    """配置双输出日志：终端（简洁）+ 文件（详细）"""
+    
+    # 创建日志目录
+    Path(log_dir).mkdir(exist_ok=True)
+    
+    # 主日志文件（记录完整日志）
+    log_file = Path(log_dir) / "bisect_full.log"
+    
+    # 配置root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)  # 全级别日志
+    
+    # 清除默认handler
+    root_logger.handlers.clear()
+    
+    # ── 终端handler：只显示关键信息 ──
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter(
+        '%(asctime)s %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    console_handler.setFormatter(console_format)
+    
+    # 终端过滤器：只显示特定级别的关键信息
+    class ConsoleFilter(logging.Filter):
+        def filter(self, record):
+            # 终端只显示：
+            # - INFO级别：包含"===="、"Step"、"✓"、"✗"、"Still waiting"、"Testing commit"
+            # - WARNING/ERROR级别
+            if record.levelno >= logging.WARNING:
+                return True
+            if record.levelno == logging.INFO:
+                keywords = ['====', 'Step', '✓', '✗', 'Still waiting', 'Testing commit', 
+                           'Running setup', 'Starting vLLM', 'Health check', 'Setup SUCCESS',
+                           'Setup FAILED', 'Service READY', 'Service NOT READY', 'Bisect DONE']
+                return any(kw in record.getMessage() for kw in keywords)
+            return False
+    
+    console_handler.addFilter(ConsoleFilter())
+    root_logger.addHandler(console_handler)
+    
+    # ── 文件handler：记录所有详细日志 ──
+    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_format)
+    root_logger.addHandler(file_handler)
+    
+    # 创建专用logger
+    log = logging.getLogger(__name__)
+    
+    log.info(f"日志配置完成")
+    log.info(f"  终端：显示关键进度（简洁）")
+    log.info(f"  文件：{log_file}（完整详细日志）")
+    
+    return log, log_file
+
+# 初始化日志（稍后在__init__中调用）
 log = logging.getLogger(__name__)
 
 
@@ -47,12 +107,19 @@ class BisectTool:
         
         Path(self.log_dir).mkdir(exist_ok=True)
         
+        # 配置双输出日志（终端简洁 + 文件详细）
+        global log
+        log, self.log_file = setup_logging(self.log_dir)
+        
         self.mode = self.detect_mode()
         self.agent_process = None
         
+        log.info("="*60)
         log.info(f"Mode detected: {self.mode}")
         log.info(f"Config dir: {self.config_dir}")
         log.info(f"Log dir: {self.log_dir}")
+        log.info(f"Full log file: {self.log_file}")
+        log.info("="*60)
         
     def detect_mode(self):
         """自动检测是单机混部还是pd分离"""
@@ -165,14 +232,23 @@ class BisectTool:
             return True
     
     def setup_all_nodes(self):
-        """执行安装脚本（增强日志输出）"""
+        """执行安装脚本（详细日志写入文件，终端显示进度）"""
         if self.mode == "single_node":
             node = self.nodes[0]
             script = self.resolve_script_path(node['scripts']['setup'])
             repo_path = self.get_repo_path()
             
+            commit_short = subprocess.check_output(
+                ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
+                timeout=5
+            ).decode().strip()
+            
+            # 创建setup专用日志文件
+            setup_log_file = Path(self.log_dir) / f"setup_{commit_short}.log"
+            
             log.info("="*60)
-            log.info(f"Running setup script: {script}")
+            log.info(f"Running setup script at commit {commit_short}")
+            log.info(f"  Full logs: {setup_log_file}")
             log.info("="*60)
             
             env = os.environ.copy()
@@ -182,25 +258,84 @@ class BisectTool:
                 timeout=5
             ).decode().strip()
             
-            commit_short = subprocess.check_output(
-                ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
-                timeout=5
-            ).decode().strip()
-            log.info(f"Setup at commit: {commit_short}")
-            
             setup_start = time.time()
             
             try:
-                # 实时显示setup输出（不使用capture_output，直接流式输出）
+                # 启动setup进程
                 process = subprocess.Popen(
                     ['bash', script], cwd=repo_path, env=env,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True
                 )
                 
-                # 实时读取stdout和stderr
-                stdout_lines = []
-                stderr_lines = []
+                # 实时读取输出并写入日志文件
+                with open(setup_log_file, 'w') as log_f:
+                    log_f.write(f"Setup started at {datetime.now().isoformat()}\n")
+                    log_f.write(f"Commit: {commit_short}\n")
+                    log_f.write(f"Script: {script}\n")
+                    log_f.write("="*60 + "\n\n")
+                    
+                    import select
+                    stdout_lines = []
+                    
+                    while process.poll() is None:
+                        # 检查是否有输出可读
+                        try:
+                            ready_fds, _, _ = select.select([process.stdout], [], [], 1.0)
+                            
+                            for fd in ready_fds:
+                                if fd == process.stdout:
+                                    line = process.stdout.readline()
+                                    if line:
+                                        line = line.rstrip()
+                                        stdout_lines.append(line)
+                                        log_f.write(f"{line}\n")  # 写入文件
+                                        log_f.flush()
+                        except:
+                            pass
+                        
+                        # 定期显示进度（终端简洁）
+                        elapsed = time.time() - setup_start
+                        if int(elapsed) % 10 == 0 and int(elapsed) > 0:
+                            remaining = max(0, 600 - elapsed)
+                            log.info(f"Still running... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining, {len(stdout_lines)} lines logged)")
+                    
+                    # 读取剩余输出
+                    remaining_output = process.stdout.read()
+                    if remaining_output:
+                        for line in remaining_output.strip().splitlines():
+                            stdout_lines.append(line)
+                            log_f.write(f"{line}\n")
+                    
+                    log_f.write("\n" + "="*60 + "\n")
+                    log_f.write(f"Setup finished at {datetime.now().isoformat()}\n")
+                    log_f.write(f"Duration: {time.time() - setup_start:.1f}s\n")
+                    log_f.write(f"Exit code: {process.returncode}\n")
+                
+                setup_elapsed = time.time() - setup_start
+                
+                if process.returncode != 0:
+                    log.error("="*60)
+                    log.error(f"✗ Setup FAILED (exit {process.returncode}) after {setup_elapsed:.1f}s")
+                    log.error(f"  Full logs: {setup_log_file}")
+                    log.error("="*60)
+                    return "fail"
+                
+                log.info("="*60)
+                log.info(f"✓ Setup SUCCESS ({setup_elapsed:.1f}s)")
+                log.info(f"  Logs: {setup_log_file} ({len(stdout_lines)} lines)")
+                log.info("="*60)
+                return "ok"
+                
+            except subprocess.TimeoutExpired:
+                setup_elapsed = time.time() - setup_start
+                log.error("="*60)
+                log.error(f"✗ Setup TIMEOUT after {setup_elapsed:.1f}s")
+                log.error(f"  Logs: {setup_log_file}")
+                log.error("="*60)
+                if process:
+                    process.kill()
+                return "fail"
                 
                 import select
                 while process.poll() is None:
@@ -268,69 +403,31 @@ class BisectTool:
             except subprocess.TimeoutExpired:
                 setup_elapsed = time.time() - setup_start
                 log.error("="*60)
-                log.error(f"Setup TIMEOUT after {setup_elapsed:.1f}s (limit 600s)")
+                log.error(f"✗ Setup TIMEOUT after {setup_elapsed:.1f}s")
+                log.error(f"  Logs: {setup_log_file}")
                 log.error("="*60)
                 if process:
                     process.kill()
                 return "fail"
-        else:
-            log.info("="*60)
-            log.info("Running setup on all nodes...")
-            log.info("="*60)
-            
-            for node in self.nodes:
-                agent_url = f"http://{node['agent']['host']}:{node['agent']['port']}"
-                timeout = node['agent'].get('timeout', 30)
-                
-                log.info(f"\n── Setup on {node['name']} ({node['role']}) ──")
-                
-                try:
-                    response = requests.post(
-                        f"{agent_url}/setup",
-                        json={"script": node['scripts']['setup']},
-                        timeout=600
-                    )
-                    result = response.json()
-                    
-                    # 显示Agent返回的setup输出
-                    if result.get('stdout'):
-                        log.info("Setup stdout:")
-                        for line in result['stdout'].strip().splitlines()[-20:]:
-                            log.info(f"  {line}")
-                    
-                    if result['status'] != 'ok':
-                        log.error("="*60)
-                        log.error(f"Setup FAILED on {node['name']}")
-                        log.error("="*60)
-                        
-                        if result.get('stderr'):
-                            log.error("Setup stderr:")
-                            for line in result['stderr'].strip().splitlines()[-20:]:
-                                log.error(f"  {line}")
-                        
-                        log.error(f"Error: {result.get('error', 'unknown')}")
-                        return "fail"
-                    
-                    log.info(f"✓ Setup SUCCESS on {node['name']}")
-                        
-                except Exception as e:
-                    log.error(f"Setup error on {node['name']}: {e}")
-                    return "fail"
-            
-            log.info("="*60)
-            log.info("Setup SUCCESS on all nodes")
-            log.info("="*60)
-            return "ok"
     
     def start_services(self):
-        """启动所有节点的服务（实时显示启动日志）"""
+        """启动所有节点的服务（详细日志写入文件，终端显示进度）"""
         if self.mode == "single_node":
             node = self.nodes[0]
             script = self.resolve_script_path(node['scripts']['start'])
             repo_path = self.get_repo_path()
             
+            commit_short = subprocess.check_output(
+                ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
+                timeout=5
+            ).decode().strip()
+            
+            # 创建服务日志文件
+            service_log_file = Path(self.log_dir) / f"service_{commit_short}.log"
+            
             log.info("="*60)
-            log.info(f"Starting vLLM service: {script}")
+            log.info("Starting vLLM service...")
+            log.info(f"  Full logs: {service_log_file}")
             log.info("="*60)
             
             env = os.environ.copy()
@@ -345,52 +442,48 @@ class BisectTool:
                 )
                 
                 log.info(f"Service started (PID {process.pid})")
-                log.info("Service logs will be displayed in real-time...")
                 
-                # 启动后台线程实时读取并显示服务日志
+                # 启动后台线程实时读取服务日志并写入文件
                 import threading
-                import queue
                 
-                log_queue = queue.Queue()
                 service_logs = []
+                service_log_file_obj = open(service_log_file, 'w')
+                service_log_file_obj.write(f"Service started at {datetime.now().isoformat()}\n")
+                service_log_file_obj.write(f"Commit: {commit_short}\n")
+                service_log_file_obj.write(f"PID: {process.pid}\n")
+                service_log_file_obj.write("="*60 + "\n\n")
                 
                 def monitor_service_logs():
-                    """后台线程：实时读取服务stdout并显示"""
+                    """后台线程：实时读取服务stdout并写入文件"""
                     try:
                         for raw_line in iter(process.stdout.readline, ""):
                             if raw_line:
                                 line = raw_line.rstrip()
                                 service_logs.append(line)
-                                # 关键日志立即显示
-                                if any(keyword in line for keyword in [
-                                    "Uvicorn running on",
-                                    "Application startup complete",
-                                    "Loaded model",
-                                    "ERROR",
-                                    "WARNING"
-                                ]):
-                                    log.info(f"[vllm] {line}")
-                                # 每隔一定行数显示进度（避免过多输出）
-                                elif len(service_logs) % 20 == 0:
-                                    log.info(f"[vllm] ... ({len(service_logs)} lines logged)")
+                                service_log_file_obj.write(f"{line}\n")
+                                service_log_file_obj.flush()
                     except:
                         pass
                 
                 monitor_thread = threading.Thread(target=monitor_service_logs, daemon=True)
                 monitor_thread.start()
                 
-                # 返回PID和监控线程相关信息
+                # 返回服务信息
                 return {
                     "single_node": process.pid,
                     "process": process,
                     "monitor_thread": monitor_thread,
-                    "service_logs": service_logs
+                    "service_logs": service_logs,
+                    "service_log_file": service_log_file,
+                    "service_log_file_obj": service_log_file_obj
                 }
             except Exception as e:
-                log.error(f"Start failed: {e}")
+                log.error(f"✗ Start failed: {e}")
                 return None
         else:
+            log.info("="*60)
             log.info("Starting services on all nodes...")
+            log.info("="*60)
             pids = {}
             
             for node in self.nodes:
@@ -626,51 +719,54 @@ class BisectTool:
         return str(value) == condition.strip()
     
     def stop_all_nodes(self, service_info=None):
-        """停止所有节点（改进日志显示）"""
+        """停止所有节点（关闭日志文件，显示摘要）"""
         log.info("="*60)
         log.info("Stopping vLLM service...")
         log.info("="*60)
         
-        if self.mode == "single_node":
-            if service_info:
-                # 显示服务日志摘要
-                if service_info.get("service_logs"):
-                    log.info(f"Service logs collected: {len(service_info['service_logs'])} lines")
-                
-                # 停止进程
-                pid = service_info.get("single_node")
-                process = service_info.get("process")
-                
-                if pid:
-                    try:
-                        os.killpg(os.getpgid(pid), signal.SIGTERM)
-                        log.info(f"Sent SIGTERM to process group (PID {pid})")
-                        # 等待进程优雅退出
-                        if process:
+        if self.mode == "single_node" and service_info:
+            # 关闭服务日志文件
+            if service_info.get("service_log_file_obj"):
+                log_file_obj = service_info["service_log_file_obj"]
+                log_file_obj.write("\n" + "="*60 + "\n")
+                log_file_obj.write(f"Service stopped at {datetime.now().isoformat()}\n")
+                log_file_obj.write(f"Total logs: {len(service_info.get('service_logs', []))} lines\n")
+                log_file_obj.close()
+                log.info(f"Service logs saved: {service_info['service_log_file']}")
+            
+            # 停止进程
+            pid = service_info.get("single_node")
+            process = service_info.get("process")
+            
+            if pid:
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    log.info(f"Sent SIGTERM to process group (PID {pid})")
+                    # 等待进程优雅退出
+                    if process:
+                        try:
+                            process.wait(timeout=15)
+                            log.info("✓ Service stopped gracefully")
+                        except subprocess.TimeoutExpired:
+                            log.warning("SIGTERM timeout, sending SIGKILL...")
                             try:
-                                process.wait(timeout=15)
-                                log.info("Service stopped gracefully")
-                            except subprocess.TimeoutExpired:
-                                log.warning("SIGTERM timeout, sending SIGKILL...")
-                                try:
-                                    os.killpg(os.getpgid(pid), signal.SIGKILL)
-                                    log.info("Service killed with SIGKILL")
-                                except ProcessLookupError:
-                                    log.info("Process already exited")
-                    except ProcessLookupError:
-                        log.info("Process not found (already stopped)")
+                                os.killpg(os.getpgid(pid), signal.SIGKILL)
+                                log.info("✓ Service killed with SIGKILL")
+                            except ProcessLookupError:
+                                log.info("Process already exited")
+                except ProcessLookupError:
+                    log.info("Process not found (already stopped)")
             
             # 执行停止脚本（可选）
             node = self.nodes[0]
             stop_script = self.resolve_script_path(node['scripts']['stop'])
             try:
                 subprocess.run(['bash', stop_script], timeout=30, capture_output=True)
-                log.info("Stop script executed")
             except:
                 pass
                 
             log.info("="*60)
-            log.info("Service stopped")
+            log.info("✓ Service stopped")
             log.info("="*60)
         else:
             for node in self.nodes:
