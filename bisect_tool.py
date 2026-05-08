@@ -411,38 +411,33 @@ class BisectTool:
                 return "fail"
     
     def start_services(self):
-        """启动服务（简化：Agent只执行脚本，不管理生命周期）"""
+        """启动服务（最简化：只执行bash start.sh）"""
         if self.mode == "single_node":
             node = self.nodes[0]
             script = self.resolve_script_path(node['scripts']['start'])
-            repo_path = self.get_repo_path()
             
             log.info("="*60)
             log.info("Starting vLLM service...")
-            log.info(f"  Script: {script}")
+            log.info(f"  Executing: bash {script}")
             log.info("="*60)
             
-            env = os.environ.copy()
-            env['BISECT_REPO_DIR'] = repo_path
-            
             try:
-                # 执行启动脚本（后台运行，不等待，不管理进程）
+                # 最简化：只执行bash脚本，不注入任何环境变量，不干预
                 subprocess.Popen(
-                    ['bash', script], cwd=repo_path, env=env,
-                    stdout=subprocess.DEVNULL,  # 不收集stdout
-                    stderr=subprocess.DEVNULL,  # 不收集stderr
-                    preexec_fn=os.setsid
+                    ['bash', script],
+                    stdout=subprocess.DEVNULL,  # 不收集输出
+                    stderr=subprocess.DEVNULL,
+                    preexec_fn=os.setsid       # 后台进程组
                 )
                 
-                log.info("✓ Start script executed (background process)")
-                log.info(f"  Service URL: http://{node['service']['host']}:{node['service']['port']}")
-                log.info("  Waiting for service ready (health check)...")
+                log.info("✓ Start script executed (background)")
+                log.info(f"  Service: http://{node['service']['host']}:{node['service']['port']}")
+                log.info("  Next: health check...")
                 
-                # 不返回任何进程信息（Agent不管理生命周期）
                 return {"status": "started"}
                 
             except Exception as e:
-                log.error(f"✗ Start failed: {e}")
+                log.error(f"✗ Failed to execute start script: {e}")
                 return None
         else:
             log.info("="*60)
