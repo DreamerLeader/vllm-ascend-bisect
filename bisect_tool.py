@@ -427,10 +427,8 @@ class BisectTool:
         timeout = self.config['bisect_options']['health_check_timeout']
         interval = self.config['bisect_options']['health_check_interval']
         
-        # 单机模式：在等待时显示服务日志
-        if self.mode == "single_node" and service_info and service_info.get("service_logs"):
-            service_logs = service_info["service_logs"]
-            last_log_count = 0
+        # 初始化日志追踪变量（避免作用域问题）
+        last_log_count = 0
         
         for node in self.nodes:
             service_url = f"http://{node['service']['host']}:{node['service']['port']}"
@@ -444,9 +442,9 @@ class BisectTool:
             while time.time() < deadline:
                 attempt += 1
                 
-                # 单机模式：显示新日志
-                if self.mode == "single_node" and service_info and service_info.get("service_logs"):
-                    current_logs = service_logs
+                # 单机模式：显示新日志（直接从service_info获取）
+                if self.mode == "single_node" and service_info and "service_logs" in service_info:
+                    current_logs = service_info["service_logs"]
                     if len(current_logs) > last_log_count:
                         new_logs = current_logs[last_log_count:]
                         for log_line in new_logs[-10:]:  # 显示最近10条新日志
