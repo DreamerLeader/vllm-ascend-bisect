@@ -9,59 +9,64 @@
 - **智能模式检测**：自动识别单机/多节点场景
 - **完整二分流程**：checkout → setup → start → verify → stop
 - **失败日志收集**：自动收集各节点日志
+- **代理配置支持**：setup时自动设置代理，完成后自动取消
 
 ---
 
 ## 快速开始（单机混部 - 最简单）
 
-### 步骤1：复制配置文件夹
+### 1. 复制配置文件夹
 
 ```bash
 cp -r bisect_config_template my_bisect
 cd my_bisect
 ```
 
-### 步骤2：修改脚本（根据实际场景）
+### 2. 配置代理（可选）
 
-编辑 `scripts/start.sh`，修改：
-- 模型路径：`--model /data/models/llama-7b`
-- 启动参数：端口、tensor_parallel_size等
-
-编辑 `scripts/accuracy.sh`，修改：
-- 数据集路径：`--dataset /data/datasets/eval.jsonl`
-- 验证参数
-
-### 步骤3：修改配置文件（可选）
-
-编辑 `config_single_node.yaml`：
-```yaml
-bisect_range:
-  good_commit: "v0.7.0"  # 已知正常的commit/tag
-  bad_commit: "main"     # 已知异常的commit/tag
-
-benchmarks:
-  - name: accuracy_check
-    check:
-      accuracy: ">= 0.95"  # 根据实际需求调整阈值
-```
-
-### 步骤4：一键运行
+如果需要代理才能安装vllm-ascend：
 
 ```bash
-python bisect_tool.py --config config_single_node.yaml
+vim proxy_env
+```
+
+填写代理配置：
+```bash
+export http_proxy=http://proxy.example.com:8080
+export https_proxy=http://proxy.example.com:8080
+export no_proxy=localhost,127.0.0.1
+```
+
+**说明**：
+- setup时会自动加载proxy_env并设置代理
+- setup完成后会自动unset代理
+- start.sh和验证脚本运行时无代理
+
+### 3. 修改脚本（根据实际场景）
+
+```bash
+vim scripts/setup.sh    # 修改安装逻辑
+vim scripts/start.sh    # 修改模型路径、启动参数
+vim scripts/accuracy.sh # 修改数据集路径、验证参数
+```
+
+### 4. 一键运行
+
+```bash
+python3 bisect_tool.py --config config_single_node.yaml
 ```
 
 **工具自动完成**：
 - ✓ clone仓库（首次）
-- ✓ 启动Agent服务（本机自动）
 - ✓ checkout每个commit
+- ✓ 设置代理（如果提供proxy_env）
 - ✓ 执行安装脚本（setup.sh）
-- ✓ 启动vLLM服务
-- ✓ 等待服务就绪（/health）
-- ✓ 运行精度/性能验证
+- ✓ 取消代理（setup完成后）
+- ✓ 启动vLLM服务（start.sh）
+- ✓ 等待服务就绪（health check）
+- ✓ 运行验证脚本
 - ✓ 二分定位问题commit
-- ✓ 输出结果到 `bisect_logs/`
-- ✓ 关闭Agent
+- ✓ 输出结果
 
 **无需手动操作！**
 

@@ -246,6 +246,22 @@ class BisectTool:
             # 创建setup专用日志文件
             setup_log_file = Path(self.log_dir) / f"setup_{commit_short}.log"
             
+            # ── 读取代理配置（如果存在） ──
+            proxy_env_file = self.config_dir / "proxy_env"
+            proxy_env_content = ""
+            
+            if proxy_env_file.exists():
+                log.info("="*60)
+                log.info("Loading proxy configuration...")
+                log.info(f"  File: {proxy_env_file}")
+                log.info("="*60)
+                
+                with open(proxy_env_file) as f:
+                    proxy_env_content = f.read()
+                
+                # 显示代理配置（终端简洁）
+                log.info("Proxy config loaded (setup will use proxy)")
+            
             log.info("="*60)
             log.info(f"Running setup script at commit {commit_short}")
             log.info(f"  Full logs: {setup_log_file}")
@@ -261,11 +277,20 @@ class BisectTool:
             setup_start = time.time()
             
             try:
+                # 构建setup命令：代理配置 + setup脚本
+                setup_cmd = f"""
+# 设置代理（如果有）
+{proxy_env_content}
+
+# 执行安装脚本
+bash {script}
+"""
+                
                 # 启动setup进程
                 process = subprocess.Popen(
-                    ['bash', script], cwd=repo_path, env=env,
+                    setup_cmd, cwd=repo_path, env=env,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True
+                    text=True, shell=True
                 )
                 
                 # 实时读取输出并写入日志文件
@@ -273,6 +298,8 @@ class BisectTool:
                     log_f.write(f"Setup started at {datetime.now().isoformat()}\n")
                     log_f.write(f"Commit: {commit_short}\n")
                     log_f.write(f"Script: {script}\n")
+                    if proxy_env_content:
+                        log_f.write(f"Proxy config:\n{proxy_env_content}\n")
                     log_f.write("="*60 + "\n\n")
                     
                     import select
@@ -325,6 +352,16 @@ class BisectTool:
                 log.info(f"✓ Setup SUCCESS ({setup_elapsed:.1f}s)")
                 log.info(f"  Logs: {setup_log_file} ({len(stdout_lines)} lines)")
                 log.info("="*60)
+                
+                # ── Setup完成后取消代理 ──
+                if proxy_env_content:
+                    log.info("Unsetting proxy (setup completed)")
+                    # 取消代理环境变量
+                    for var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'all_proxy']:
+                        if var in os.environ:
+                            del os.environ[var]
+                    log.info("✓ Proxy unset")
+                
                 return "ok"
                 
             except subprocess.TimeoutExpired:
