@@ -503,19 +503,6 @@ class BisectTool:
                     log.error(f"  {log_line}")
             
             return False
-                    if response.status_code == 200:
-                        log.info(f"✓ {node['name']} READY")
-                        break
-                except:
-                    pass
-                
-                if attempt % 10 == 0:
-                    log.info(f"  Waiting... ({attempt} attempts, {deadline - time.time():.0f}s remaining)")
-                time.sleep(interval)
-            
-            if time.time() >= deadline:
-                log.error(f"✗ {node['name']} NOT READY after {timeout}s")
-                return False
         
         return True
     
