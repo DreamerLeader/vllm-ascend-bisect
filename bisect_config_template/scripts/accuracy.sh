@@ -4,8 +4,7 @@
 aisbench accuracy \
     --url http://127.0.0.1:8000/v1/completions \
     --model llama-7b \
-    --dataset /data/datasets/eval.jsonl \
-    --output ./output
+    --dataset /data/datasets/eval.jsonl
 
-# 结果保存结构：
-# output/2026-05-08_20-15-30/results/vllm-api-stream-chat/xxx.json
+# aisbench自动创建目录结构：
+# outputs/default/20260508_171903/results/vllm-api-stream-chat/xxxx.json

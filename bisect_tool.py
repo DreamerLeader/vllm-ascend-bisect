@@ -675,43 +675,50 @@ bash {script}
                     # 绝对路径
                     result_file_abs = Path(result_file_config)
                     
-                elif result_file_config.startswith('./output/') or result_file_config == './output':
-                    # output文件夹：自动查找最新的时间文件夹
-                    output_dir = self.config_dir / 'output'
+                elif result_file_config.startswith('./outputs') or result_file_config == './outputs':
+                    # outputs文件夹：自动查找最新的时间文件夹
+                    # 真实结构：outputs/default/20260508_171903/results/vllm-api-stream-chat/*.json
+                    outputs_dir = self.config_dir / 'outputs'
                     
-                    if output_dir.exists():
-                        # 找到output下所有时间文件夹（如 2026-05-08_20-15-30）
-                        time_folders = sorted(
-                            [d for d in output_dir.iterdir() if d.is_dir()],
-                            key=lambda x: x.name,  # 按名称排序（时间格式）
-                            reverse=True  # 最新的在前
-                        )
+                    if outputs_dir.exists():
+                        # 找到outputs下default文件夹
+                        default_dir = outputs_dir / 'default'
                         
-                        if time_folders:
-                            latest_folder = time_folders[0]  # 取最新的
+                        if default_dir.exists():
+                            # 找到default下所有时间文件夹（如 20260508_171903）
+                            time_folders = sorted(
+                                [d for d in default_dir.iterdir() if d.is_dir()],
+                                key=lambda x: x.name,  # 按名称排序（时间格式）
+                                reverse=True  # 最新的在前
+                            )
                             
-                            # 在最新文件夹下查找results/vllm-api-stream-chat/*.json
-                            results_dir = latest_folder / 'results' / 'vllm-api-stream-chat'
-                            
-                            if results_dir.exists():
-                                # 找到所有json文件，取最新的
-                                json_files = sorted(
-                                    [f for f in results_dir.glob('*.json')],
-                                    key=lambda x: x.stat().st_mtime,
-                                    reverse=True
-                                )
+                            if time_folders:
+                                latest_folder = time_folders[0]  # 取最新的
                                 
-                                if json_files:
-                                    result_file_abs = json_files[0]  # 取最新的json文件
-                                    log.info(f"  Found result: {result_file_abs.relative_to(self.config_dir)}")
+                                # 在最新文件夹下查找results/vllm-api-stream-chat/*.json
+                                results_dir = latest_folder / 'results' / 'vllm-api-stream-chat'
+                                
+                                if results_dir.exists():
+                                    # 找到所有json文件，取最新的
+                                    json_files = sorted(
+                                        [f for f in results_dir.glob('*.json')],
+                                        key=lambda x: x.stat().st_mtime,
+                                        reverse=True
+                                    )
+                                    
+                                    if json_files:
+                                        result_file_abs = json_files[0]  # 取最新的json文件
+                                        log.info(f"  Found: outputs/default/{latest_folder.name}/results/vllm-api-stream-chat/{result_file_abs.name}")
+                                    else:
+                                        log.error(f"  ✗ No JSON files in {results_dir}")
                                 else:
-                                    log.error(f"  ✗ No JSON files in {results_dir}")
+                                    log.error(f"  ✗ Results dir not found: outputs/default/{latest_folder.name}/results/vllm-api-stream-chat/")
                             else:
-                                log.error(f"  ✗ Results dir not found: {results_dir.relative_to(self.config_dir)}")
+                                log.error(f"  ✗ No time folders in outputs/default/")
                         else:
-                            log.error(f"  ✗ No time folders in output/")
+                            log.error(f"  ✗ outputs/default/ folder not found")
                     else:
-                        log.error(f"  ✗ output folder not found")
+                        log.error(f"  ✗ outputs folder not found")
                         
                 else:
                     # 其他相对路径：基于config_dir
@@ -735,7 +742,7 @@ bash {script}
                         log.warning(f"  Actual result: {data}")
                 else:
                     log.error(f"  ✗ Result file not found")
-                    log.error(f"    Expected structure: output/{latest_time_folder}/results/vllm-api-stream-chat/*.json")
+                    log.error(f"    Expected: outputs/default/{时间}/results/vllm-api-stream-chat/*.json")
                     all_passed = False
                     
             except subprocess.TimeoutExpired:
