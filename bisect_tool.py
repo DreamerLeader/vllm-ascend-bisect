@@ -664,21 +664,65 @@ bash {script}
                     if result.stderr:
                         log.warning(f"  stderr tail: {result.stderr[-200:]}")
                 
-                # 解析结果文件
-                result_file = bench['result_file']
+                # 解析结果文件（支持复杂目录结构）
+                result_file_config = bench['result_file']
                 
-                # 支持相对路径（output文件夹）
-                if result_file.startswith('./') or not result_file.startswith('/'):
-                    # 相对路径基于config_dir（脚本运行目录）
-                    result_file_abs = self.config_dir / result_file
+                # ── 智能查找结果文件 ──
+                result_file_abs = None
+                
+                # 情况1: 配置中明确指定了结果文件路径
+                if result_file_config.startswith('/'):
+                    # 绝对路径
+                    result_file_abs = Path(result_file_config)
+                    
+                elif result_file_config.startswith('./output/') or result_file_config == './output':
+                    # output文件夹：自动查找最新的时间文件夹
+                    output_dir = self.config_dir / 'output'
+                    
+                    if output_dir.exists():
+                        # 找到output下所有时间文件夹（如 2026-05-08_20-15-30）
+                        time_folders = sorted(
+                            [d for d in output_dir.iterdir() if d.is_dir()],
+                            key=lambda x: x.name,  # 按名称排序（时间格式）
+                            reverse=True  # 最新的在前
+                        )
+                        
+                        if time_folders:
+                            latest_folder = time_folders[0]  # 取最新的
+                            
+                            # 在最新文件夹下查找results/vllm-api-stream-chat/*.json
+                            results_dir = latest_folder / 'results' / 'vllm-api-stream-chat'
+                            
+                            if results_dir.exists():
+                                # 找到所有json文件，取最新的
+                                json_files = sorted(
+                                    [f for f in results_dir.glob('*.json')],
+                                    key=lambda x: x.stat().st_mtime,
+                                    reverse=True
+                                )
+                                
+                                if json_files:
+                                    result_file_abs = json_files[0]  # 取最新的json文件
+                                    log.info(f"  Found result: {result_file_abs.relative_to(self.config_dir)}")
+                                else:
+                                    log.error(f"  ✗ No JSON files in {results_dir}")
+                            else:
+                                log.error(f"  ✗ Results dir not found: {results_dir.relative_to(self.config_dir)}")
+                        else:
+                            log.error(f"  ✗ No time folders in output/")
+                    else:
+                        log.error(f"  ✗ output folder not found")
+                        
                 else:
-                    result_file_abs = Path(result_file)
+                    # 其他相对路径：基于config_dir
+                    result_file_abs = self.config_dir / result_file_config
                 
-                if result_file_abs.exists():
+                # ── 解析结果并校验 ──
+                if result_file_abs and result_file_abs.exists():
                     with open(result_file_abs) as f:
                         data = json.load(f)
                     
-                    log.info(f"  Result file: {result_file_abs}")
+                    log.info(f"  Result file: {result_file_abs.name}")
                     
                     # 校验阈值
                     passed = self.check_threshold(data, bench['check'])
@@ -690,8 +734,8 @@ bash {script}
                         log.warning(f"  ⚠ Check failed: {bench['check']}")
                         log.warning(f"  Actual result: {data}")
                 else:
-                    log.error(f"  ✗ Result file not found: {result_file_abs}")
-                    log.error(f"    Expected location: output folder in config directory")
+                    log.error(f"  ✗ Result file not found")
+                    log.error(f"    Expected structure: output/{latest_time_folder}/results/vllm-api-stream-chat/*.json")
                     all_passed = False
                     
             except subprocess.TimeoutExpired:

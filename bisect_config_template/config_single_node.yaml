@@ -41,7 +41,7 @@ benchmarks:
     enable: true                      # 可选：false则跳过
     script: ./scripts/accuracy.sh
     timeout: 600
-    result_file: ./output/accuracy_result.json  # 相对路径：output文件夹
+    result_file: ./output             # 自动查找output下最新时间文件夹/results/vllm-api-stream-chat/*.json
     check:
       accuracy: ">= 0.95"
       
