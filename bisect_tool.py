@@ -232,7 +232,7 @@ class BisectTool:
             return True
     
     def setup_all_nodes(self):
-        """执行安装脚本（详细日志写入文件，终端显示进度）"""
+        """执行安装脚本（自动配套vllm版本 + 详细日志）"""
         if self.mode == "single_node":
             node = self.nodes[0]
             script = self.resolve_script_path(node['scripts']['setup'])
@@ -242,6 +242,21 @@ class BisectTool:
                 ['git', '-C', repo_path, 'rev-parse', '--short', 'HEAD'],
                 timeout=5
             ).decode().strip()
+            
+            # ── 自动读取vllm版本（从docs/source/conf.py） ──
+            vllm_version = self._extract_vllm_version(repo_path)
+            
+            if vllm_version:
+                log.info("="*60)
+                log.info(f"Auto-detected vllm version: {vllm_version}")
+                log.info(f"  Source: docs/source/conf.py")
+                log.info("="*60)
+            
+            # YAML可选覆盖（用户手动指定版本）
+            manual_vllm_version = self.config.get('bisect_options', {}).get('vllm_version')
+            if manual_vllm_version:
+                log.info(f"Using manual vllm version from YAML: {manual_vllm_version}")
+                vllm_version = manual_vllm_version
             
             # 创建setup专用日志文件
             setup_log_file = Path(self.log_dir) / f"setup_{commit_short}.log"
@@ -277,14 +292,27 @@ class BisectTool:
             setup_start = time.time()
             
             try:
-                # 构建setup命令：代理配置 + setup脚本
-                setup_cmd = f"""
-# 设置代理（如果有）
+                # 构建setup命令：vllm安装 + vllm-ascend安装
+                setup_cmd_parts = []
+                
+                # 1. vllm安装（如果有版本）
+                if vllm_version:
+                    setup_cmd_parts.append(f"pip install vllm=={vllm_version} -q")
+                
+                # 2. vllm-ascend安装（用户脚本）
+                setup_cmd_parts.append(f"bash {script}")
+                
+                # 3. 代理配置（如果有）
+                if proxy_env_content:
+                    setup_cmd = f"""
+# 设置代理
 {proxy_env_content}
 
-# 执行安装脚本
-bash {script}
+# 安装vllm和vllm-ascend
+{'; '.join(setup_cmd_parts)}
 """
+                else:
+                    setup_cmd = '; '.join(setup_cmd_parts)
                 
                 # 启动setup进程
                 process = subprocess.Popen(
@@ -298,6 +326,8 @@ bash {script}
                     log_f.write(f"Setup started at {datetime.now().isoformat()}\n")
                     log_f.write(f"Commit: {commit_short}\n")
                     log_f.write(f"Script: {script}\n")
+                    if vllm_version:
+                        log_f.write(f"vllm version: {vllm_version}\n")
                     if proxy_env_content:
                         log_f.write(f"Proxy config:\n{proxy_env_content}\n")
                     log_f.write("="*60 + "\n\n")
@@ -446,6 +476,33 @@ bash {script}
                 if process:
                     process.kill()
                 return "fail"
+    
+    def _extract_vllm_version(self, repo_path):
+        """从docs/source/conf.py提取vllm版本"""
+        conf_file = Path(repo_path) / 'docs' / 'source' / 'conf.py'
+        
+        if not conf_file.exists():
+            log.warning(f"  docs/source/conf.py not found, cannot auto-detect vllm version")
+            return None
+        
+        try:
+            with open(conf_file) as f:
+                content = f.read()
+            
+            # 提取 pip_vllm_version = "0.17.0"
+            import re
+            match = re.search(r'pip_vllm_version["\']?\s*[:=]\s*["\']([\d.]+(?:rc\d+)?)["\']', content)
+            
+            if match:
+                version = match.group(1)
+                return version
+            else:
+                log.warning(f"  Cannot extract pip_vllm_version from conf.py")
+                return None
+                
+        except Exception as e:
+            log.warning(f"  Failed to read conf.py: {e}")
+            return None
     
     def start_services(self):
         """启动服务（最简化：只执行bash start.sh）"""
@@ -740,6 +797,30 @@ bash {script}
                         all_passed = False
                         log.warning(f"  ⚠ Check failed: {bench['check']}")
                         log.warning(f"  Actual result: {data}")
+                elif 'result_file' not in bench or not bench.get('result_file'):
+                    # 没有配置result_file，尝试从日志提取关键词
+                    log.info(f"  Extracting from log (no result_file)")
+                    
+                    # 从benchmark日志文件提取关键词（如TTFT）
+                    keywords_data = self._extract_keywords_from_log(
+                        bench_log_file, bench.get('keywords', [])
+                    )
+                    
+                    if keywords_data:
+                        log.info(f"  Extracted keywords: {keywords_data}")
+                        
+                        # 校验关键词阈值
+                        passed = self.check_threshold(keywords_data, bench['check'])
+                        
+                        log.info(f"  Status: {'PASS' if passed else 'FAIL'}")
+                        
+                        if not passed:
+                            all_passed = False
+                            log.warning(f"  ⚠ Check failed: {bench['check']}")
+                            log.warning(f"  Actual result: {keywords_data}")
+                    else:
+                        log.error(f"  ✗ Failed to extract keywords from log")
+                        all_passed = False
                 else:
                     log.error(f"  ✗ Result file not found")
                     log.error(f"    Expected: outputs/default/{时间}/results/vllm-api-stream-chat/*.json")
@@ -763,6 +844,45 @@ bash {script}
         log.info("="*60)
         
         return all_passed
+    
+    def _extract_keywords_from_log(self, log_file, keywords_config):
+        """从benchmark日志文件提取关键词（如TTFT）"""
+        if not log_file.exists():
+            return None
+        
+        try:
+            with open(log_file) as f:
+                log_content = f.read()
+            
+            extracted_data = {}
+            
+            # 支持的关键词格式：
+            # TTFT: 123.4 ms
+            # Throughput: 100.5 tokens/sec
+            # Latency: 150.2 ms
+            
+            import re
+            
+            # TTFT提取（主要需求）
+            ttft_match = re.search(r'TTFT:\s+(\d+\.?\d*)\s+ms', log_content)
+            if ttft_match:
+                extracted_data['ttft'] = float(ttft_match.group(1))
+            
+            # Throughput提取（可选）
+            throughput_match = re.search(r'Throughput:\s+(\d+\.?\d*)\s+tokens/sec', log_content)
+            if throughput_match:
+                extracted_data['throughput'] = float(throughput_match.group(1))
+            
+            # Latency提取（可选）
+            latency_match = re.search(r'Latency:\s+(\d+\.?\d*)\s+ms', log_content)
+            if latency_match:
+                extracted_data['latency'] = float(latency_match.group(1))
+            
+            return extracted_data if extracted_data else None
+            
+        except Exception as e:
+            log.warning(f"  Failed to extract keywords: {e}")
+            return None
     
     def check_threshold(self, data, rules):
         """校验阈值"""
