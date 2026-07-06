@@ -4,7 +4,7 @@
 
 ## 核心特性
 
-- **单机混部优先**：自动启动Agent，一键运行（80%场景）
+- **单机混部优先**：本地直接执行，一键运行（80%场景）
 - **pd分离扩展**：支持多节点部署（20%场景）
 - **智能模式检测**：自动识别单机/多节点场景
 - **完整二分流程**：checkout → setup → start → verify → stop
@@ -53,7 +53,7 @@ vim scripts/accuracy.sh # 修改数据集路径、验证参数
 ### 4. 一键运行
 
 ```bash
-python3 bisect_tool.py --config config_single_node.yaml
+python3 ../bisect_tool.py --config config_single_node.yaml
 ```
 
 **工具自动完成**：
@@ -113,7 +113,7 @@ scp scripts/*.sh 192.168.1.11:/home/user/scripts/
 ### 步骤4：运行工具
 
 ```bash
-python bisect_tool.py --config config_pd_separated.yaml
+python3 ../bisect_tool.py --config config_pd_separated.yaml
 ```
 
 ---
@@ -128,7 +128,7 @@ python bisect_tool.py --config config_pd_separated.yaml
 | node.role | `all` | `p` / `d` |
 | agent.host | `127.0.0.1` | 远程IP |
 | scripts路径 | 相对路径（在配置文件夹） | 绝对路径（各机器） |
-| Agent启动 | 工具自动启动 | 用户手动启动 |
+| Agent启动 | 不需要 | 用户手动启动 |
 
 ### config.yaml字段说明
 
@@ -256,7 +256,7 @@ check:
 
 ### Q1: Agent启动失败？
 
-检查：
+单机混部模式不需要启动Agent；如果多节点模式失败，检查：
 1. Python和Flask是否安装：`pip install flask`
 2. 仓库路径是否正确：`--repo-path`
 3. 端口是否被占用：`lsof -i:8080`
@@ -270,7 +270,7 @@ check:
 
 ### Q3: 安装失败？
 
-查看Agent日志（通过 `/logs` 接口或查看控制台输出）
+单机混部模式查看 `bisect_logs/setup_*.log`；多节点模式查看Agent日志（通过 `/logs` 接口或查看控制台输出）
 
 ### Q4: 验证脚本失败？
 
@@ -279,19 +279,18 @@ check:
 2. 环境变量是否注入（VLLM_HOST/PORT）
 3. 结果文件是否生成（JSON格式）
 
-### Q5: 单机混部模式下Agent未自动启动？
+### Q5: 单机混部模式为什么不启动Agent？
 
-检查：
-1. agent_server.py 是否在配置文件夹中
-2. 仓库路径是否正确配置
-3. 端口是否被占用
+这是当前预期行为。单机混部模式会在本机直接执行 checkout、setup、start、benchmark，不再启动Agent。
 
 ---
 
 ## 依赖
 
 ```bash
-pip install pyyaml flask requests
+pip install pyyaml requests
+# 多节点Agent服务额外需要：
+pip install flask
 ```
 
 ---
@@ -300,10 +299,10 @@ pip install pyyaml flask requests
 
 ```
 单机混部流程（自动）:
-  1. 工具启动本地Agent
+  1. 工具在本机直接执行
   2. checkout commit → setup → start → wait ready → verify → stop
   3. 二分循环: pass → 右移, fail → 左移
-  4. 定位到问题commit → 输出结果 → 关闭Agent
+  4. 定位到问题commit → 输出结果
 
 pd分离流程（手动+自动）:
   1. 用户手动启动各机器Agent

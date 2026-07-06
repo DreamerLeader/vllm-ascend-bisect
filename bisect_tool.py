@@ -3,7 +3,7 @@
 vllm-ascend二分定位工具 - 支持单机混部和pd分离
 
 核心特性：
-  1. 单机混部优先：自动启动Agent，直接执行命令，最简单
+  1. 单机混部优先：本地直接执行命令，最简单
   2. pd分离扩展：通过HTTP API协调多节点
   3. 智能模式检测：自动识别单机/多节点场景
   4. 完整二分流程：checkout -> setup -> start -> verify -> stop
@@ -137,38 +137,12 @@ class BisectTool:
         return repo_path
     
     def start_agent_if_needed(self):
-        """单机模式：自动启动Agent"""
+        """按运行模式检查Agent；单机模式无需Agent。"""
         if self.mode == "single_node":
-            node = self.nodes[0]
-            agent_url = f"http://{node['agent']['host']}:{node['agent']['port']}"
-            
-            try:
-                response = requests.get(f"{agent_url}/health", timeout=2)
-                if response.json()['status'] == 'ok':
-                    log.info("Agent already running")
-                    return True
-            except:
-                pass
-            
-            log.info("Auto-starting local agent...")
-            
-            agent_script = self.config_dir / "agent_server.py"
-            repo_path = self.get_repo_path()
-            
-            self.agent_process = subprocess.Popen([
-                'python', str(agent_script),
-                '--port', str(node['agent']['port']),
-                '--repo-path', repo_path
-            ], cwd=self.config_dir)
-            
-            time.sleep(3)
-            try:
-                requests.get(f"{agent_url}/health", timeout=2)
-                log.info("Agent started successfully")
-                return True
-            except:
-                log.error("Failed to start Agent")
-                return False
+            # Single-node mode executes checkout/setup/start/benchmark locally.
+            # Requiring an Agent here adds an unused Flask service dependency.
+            log.info("Single-node mode uses local execution; skipping Agent startup")
+            return True
         else:
             return self.check_agents_online()
     

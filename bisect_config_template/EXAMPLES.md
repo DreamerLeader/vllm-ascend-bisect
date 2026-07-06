@@ -61,7 +61,7 @@ benchmarks:
 
 ```bash
 # 5. 一键运行
-python3 bisect_tool.py --config config_single_node.yaml
+python3 ../bisect_tool.py --config config_single_node.yaml
 ```
 
 ### 输出
@@ -189,7 +189,7 @@ scp scripts/setup.sh scripts/start_d.sh scripts/stop.sh 192.168.1.11:/home/user/
 #### 步骤5：运行工具
 
 ```bash
-python3 bisect_tool.py --config config_pd_separated.yaml
+python3 ../bisect_tool.py --config config_pd_separated.yaml
 ```
 
 ### 输出

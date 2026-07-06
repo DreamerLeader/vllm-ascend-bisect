@@ -4,7 +4,7 @@
 
 ## 核心特性
 
-- **单机混部优先**：自动启动Agent，一键运行（80%场景）
+- **单机混部优先**：本地直接执行，一键运行（80%场景）
 - **pd分离扩展**：支持多节点部署（20%场景）
 - **智能模式检测**：自动识别单机/多节点场景
 - **完整二分流程**：checkout → setup → start → verify → stop
@@ -31,12 +31,11 @@ vim scripts/accuracy.sh # 修改数据集路径、验证参数
 ### 3. 一键运行
 
 ```bash
-python3 bisect_tool.py --config config_single_node.yaml
+python3 ../bisect_tool.py --config config_single_node.yaml
 ```
 
 **工具自动完成**：
 - ✓ clone仓库（首次）
-- ✓ 启动Agent服务（本机自动）
 - ✓ checkout每个commit
 - ✓ 执行安装脚本
 - ✓ 启动vLLM服务
@@ -59,7 +58,9 @@ python3 bisect_tool.py --config config_single_node.yaml
 ## 依赖
 
 ```bash
-pip install pyyaml flask requests
+pip install pyyaml requests
+# 多节点Agent服务额外需要：
+pip install flask
 ```
 
 ---
@@ -105,7 +106,7 @@ pip install pyyaml flask requests
 |------|---------|--------|
 | 使用频率 | 80%场景 | 20%场景 |
 | 配置复杂度 | 最简单 | 稍复杂 |
-| Agent启动 | 工具自动 | 用户手动 |
+| Agent启动 | 不需要 | 用户手动 |
 | 脚本路径 | 相对路径（配置文件夹） | 绝对路径（各机器） |
 | 节点数量 | 1个（role=all） | 多个（role=p/d） |
 
@@ -116,11 +117,11 @@ pip install pyyaml flask requests
 ### 单机混部（自动）
 
 ```
-工具启动 → 自动启动Agent → checkout → setup → start → wait ready → verify → stop
+工具启动 → checkout → setup → start → wait ready → verify → stop
            ↓
        二分循环: pass → 右移, fail → 左移
            ↓
-       定位问题commit → 输出结果 → 关闭Agent
+       定位问题commit → 输出结果
 ```
 
 ### pd分离（手动+自动）
@@ -157,7 +158,7 @@ pip install pyyaml flask requests
 
 ### Q: Agent启动失败？
 
-检查：Python和Flask是否安装、端口是否被占用
+单机混部模式不需要启动Agent；如果多节点模式失败，检查Python和Flask是否安装、端口是否被占用
 
 ### Q: 健康检查超时？
 

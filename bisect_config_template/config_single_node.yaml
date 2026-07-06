@@ -21,7 +21,7 @@ nodes:
     role: all                    # 单机混部标识
     
     agent:
-      host: 127.0.0.1            # 本机（工具自动启动Agent）
+      host: 127.0.0.1            # 本机标识（单机模式本地执行，不启动Agent）
       port: 8080
       
     service:

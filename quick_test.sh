@@ -9,12 +9,12 @@ echo "============================================"
 
 # 检查依赖
 echo "\n[1] 检查依赖..."
-python3 -c "import yaml, flask, requests" 2>&1
+python3 -c "import yaml, requests" 2>&1
 if [ $? -eq 0 ]; then
-    echo "✓ 依赖已安装"
+    echo "✓ 单机模式依赖已安装"
 else
     echo "✗ 缺少依赖，请安装："
-    echo "  pip install pyyaml flask requests"
+    echo "  pip install pyyaml requests"
     exit 1
 fi
 
@@ -45,8 +45,8 @@ for script in "${scripts[@]}"; do
     fi
 done
 
-# 检查Agent服务
-echo "\n[4] 检查Agent服务..."
+# 检查Agent服务脚本（多节点模式使用）
+echo "\n[4] 检查Agent服务脚本..."
 if [ -f "bisect_config_template/agent_server.py" ]; then
     echo "✓ agent_server.py 存在"
 else
@@ -74,7 +74,7 @@ echo "\n  2. 修改脚本（根据实际场景）："
 echo "     vim scripts/start.sh"
 echo "     vim scripts/accuracy.sh"
 echo "\n  3. 运行工具："
-echo "     python3 bisect_tool.py --config config_single_node.yaml"
+echo "     python3 ../bisect_tool.py --config config_single_node.yaml"
 echo "\n完整使用说明请查看："
 echo "  bisect_config_template/README.md"
 echo "============================================"
