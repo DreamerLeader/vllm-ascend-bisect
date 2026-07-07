@@ -5,7 +5,8 @@
 ### 功能1：vllm版本自动配套
 - checkout后自动读取 `docs/source/conf.py`
 - 提取 `pip_vllm_version`（如 `0.17.0`）
-- setup时自动安装：`pip install vllm==0.17.0` + `pip install -e . --no-deps`
+- setup时默认自动安装：`pip install vllm==0.17.0` + `pip install -e . --no-deps`
+- 如当前环境已安装vLLM，可设置 `bisect_options.install_vllm: false` 关闭自动安装
 
 ### 功能2：TTFT性能验证
 - 从benchmark日志文件提取关键词 `TTFT: 123.4 ms`
@@ -58,12 +59,13 @@ pip install vllm==0.17.0
 pip install -e . --no-deps -q
 ```
 
-**改动后**（工具自动处理vllm版本）：
+**改动后**（工具默认处理vllm版本，可关闭）：
 ```bash
 #!/bin/bash
 cd /home/user/vllm-ascend
 
-# 工具自动安装配套的vllm版本
+# 默认情况下，工具会在执行本脚本前自动安装配套vllm版本
+# 如需关闭，设置 bisect_options.install_vllm: false
 # 用户只需安装vllm-ascend
 pip install -e . --no-deps -q
 ```
@@ -122,6 +124,7 @@ bisect_range:
 # 二分参数
 bisect_options:
   skip_initial_verification: false  # true=确认good/bad边界可靠，直接从中间commit开始
+  install_vllm: true       # false=不自动pip install vllm
   vllm_version: null       # null=自动读取，或手动指定如"0.17.0"
 
 # 验证任务
@@ -157,14 +160,14 @@ python3 ../bisect_tool.py --config config_single_node.yaml
 ┌─────────────────────────────────────────────────────────┐
 │ 1. checkout commit                                       │
 │    └─→ git checkout {commit}                             │
-│    └─→ 自动读取 docs/source/conf.py                      │
+│    └─→ 如install_vllm=true，自动读取 docs/source/conf.py  │
 │    └→ 提取 pip_vllm_version: "0.17.0"                    │
 └─────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────┐
-│ 2. setup（自动配套vllm）                                  │
+│ 2. setup（可选自动配套vllm）                              │
 │    └→ 设置代理（如果有proxy_env）                         │
-│    └→ pip install vllm==0.17.0 -q  ← 工具自动注入        │
+│    └→ pip install vllm==0.17.0 -q  ← true时注入            │
 │    └→ bash setup.sh（安装vllm-ascend）                   │
 │    └→ unset代理                                          │
 │    └→ 保存日志：bisect_logs/setup_{commit}.log           │
@@ -226,7 +229,7 @@ Proxy config loaded (setup will use proxy)
 Running setup script at commit abc1234
   Full logs: bisect_logs/setup_abc1234.log
 ============================================================
-[pip install vllm==0.17.0 output]
+[pip install vllm==0.17.0 output]  # install_vllm=true时出现
 [setup.sh output]
 Still running... (30s elapsed, 570s remaining)
 ============================================================
@@ -273,9 +276,9 @@ Unsetting proxy (setup completed)
 
 | 配置方式 | YAML设置 | 说明 |
 |---------|---------|------|
-| 自动读取 | `vllm_version: null` | 工具从docs/source/conf.py读取 |
-| 手动指定 | `vllm_version: "0.17.0"` | 用户在YAML中手动指定版本 |
-| 不安装vllm | 删除该配置项 | 如果不需要vllm |
+| 自动读取 | `install_vllm: true` + `vllm_version: null` | 工具从docs/source/conf.py读取 |
+| 手动指定 | `install_vllm: true` + `vllm_version: "0.17.0"` | 用户在YAML中手动指定版本 |
+| 不安装vllm | `install_vllm: false` | 当前环境已安装或由setup脚本自行管理 |
 
 ### 性能关键词配置
 
@@ -326,6 +329,7 @@ benchmarks:
 
 **解决**：
 - 手动在YAML指定：`bisect_options.vllm_version: "0.17.0"`
+- 如果当前环境已安装好vLLM，设置 `bisect_options.install_vllm: false`
 
 ### Q2: TTFT提取失败？
 
@@ -382,11 +386,11 @@ pip install -e . --no-deps -q
 - 需要配置result_file
 - 需要结果文件是JSON格式
 
-### 改动后（自动处理）
+### 改动后（默认自动处理，可关闭）
 
 **setup.sh**：
 ```bash
-# 工具自动安装配套vllm
+# 默认工具会自动安装配套vllm；如需关闭，设置 install_vllm: false
 pip install -e . --no-deps -q
 ```
 

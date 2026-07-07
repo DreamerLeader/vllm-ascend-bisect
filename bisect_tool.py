@@ -142,6 +142,10 @@ class BisectTool:
         if 'skip_initial_verification' in options:
             return bool(options['skip_initial_verification'])
         return bool(options.get('skip_verify', False))
+
+    def should_install_vllm(self):
+        """Return whether setup should inject vLLM installation before user script."""
+        return bool(self.config.get('bisect_options', {}).get('install_vllm', True))
     
     def start_agent_if_needed(self):
         """按运行模式检查Agent；单机模式无需Agent。"""
@@ -224,20 +228,24 @@ class BisectTool:
                 timeout=5
             ).decode().strip()
             
-            # ── 自动读取vllm版本（从docs/source/conf.py） ──
-            vllm_version = self._extract_vllm_version(repo_path)
-            
-            if vllm_version:
-                log.info("="*60)
-                log.info(f"Auto-detected vllm version: {vllm_version}")
-                log.info(f"  Source: docs/source/conf.py")
-                log.info("="*60)
-            
-            # YAML可选覆盖（用户手动指定版本）
-            manual_vllm_version = self.config.get('bisect_options', {}).get('vllm_version')
-            if manual_vllm_version:
-                log.info(f"Using manual vllm version from YAML: {manual_vllm_version}")
-                vllm_version = manual_vllm_version
+            vllm_version = None
+            if self.should_install_vllm():
+                # ── 自动读取vllm版本（从docs/source/conf.py） ──
+                vllm_version = self._extract_vllm_version(repo_path)
+
+                if vllm_version:
+                    log.info("="*60)
+                    log.info(f"Auto-detected vllm version: {vllm_version}")
+                    log.info(f"  Source: docs/source/conf.py")
+                    log.info("="*60)
+
+                # YAML可选覆盖（用户手动指定版本）
+                manual_vllm_version = self.config.get('bisect_options', {}).get('vllm_version')
+                if manual_vllm_version:
+                    log.info(f"Using manual vllm version from YAML: {manual_vllm_version}")
+                    vllm_version = manual_vllm_version
+            else:
+                log.info("Skipping vLLM auto-install (bisect_options.install_vllm=false)")
             
             # 创建setup专用日志文件
             setup_log_file = Path(self.log_dir) / f"setup_{commit_short}.log"
@@ -273,7 +281,7 @@ class BisectTool:
             setup_start = time.time()
             
             try:
-                # 构建setup命令：vllm安装 + vllm-ascend安装
+                # 构建setup命令：可选vllm安装 + vllm-ascend安装
                 setup_cmd_parts = []
                 
                 # 1. vllm安装（如果有版本）

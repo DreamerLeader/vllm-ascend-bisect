@@ -138,6 +138,7 @@ python3 ../bisect_tool.py --config config_pd_separated.yaml
 | `repo.local_path` | 本地仓库路径 | `./vllm-ascend`（相对）或 `/home/user/vllm-ascend`（绝对） |
 | `bisect_range.good_commit` | 已知正常的commit/tag | `v0.7.0` |
 | `bisect_range.bad_commit` | 已知异常的commit/tag | `main` |
+| `bisect_options.install_vllm` | 是否在setup前自动安装配套vLLM | `true` / `false` |
 | `nodes[].agent.host/port` | Agent服务地址 | `127.0.0.1:8080` |
 | `nodes[].service.host/port` | vLLM服务地址（健康检查） | `127.0.0.1:8000` |
 | `nodes[].scripts.setup` | 安装脚本路径 | `./scripts/setup.sh` |

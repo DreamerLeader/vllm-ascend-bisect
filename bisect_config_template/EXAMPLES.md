@@ -248,7 +248,21 @@ bisect_options:
 
 ---
 
-## 示例5：混合验证场景
+## 示例5：关闭vLLM自动安装
+
+### 场景描述
+当前环境已经安装好vLLM，或者希望setup脚本自行管理vLLM版本。
+
+### 配置修改
+
+```yaml
+bisect_options:
+  install_vllm: false  # 不注入pip install vllm，只执行setup脚本
+```
+
+---
+
+## 示例6：混合验证场景
 
 ### 场景描述
 同时验证精度和性能，两个指标必须同时满足。
