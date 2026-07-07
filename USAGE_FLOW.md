@@ -121,6 +121,7 @@ bisect_range:
 
 # 二分参数
 bisect_options:
+  skip_initial_verification: false  # true=确认good/bad边界可靠，直接从中间commit开始
   vllm_version: null       # null=自动读取，或手动指定如"0.17.0"
 
 # 验证任务

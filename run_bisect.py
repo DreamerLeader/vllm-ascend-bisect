@@ -57,7 +57,11 @@ def main():
     parser.add_argument("--analyze", action="store_true", help="二分完成后调用 Claude 分析根因")
     parser.add_argument("--model", default="claude-sonnet-4-20250514", help="分析用的 Claude 模型")
     parser.add_argument("--error-description", default="", help="错误描述 (帮助 Agent 分析)")
-    parser.add_argument("--skip-verify", action="store_true", help="跳过 good/bad 验证")
+    parser.add_argument(
+        "--skip-verify", "--skip-initial-verification",
+        dest="skip_verify", action="store_true",
+        help="跳过 good/bad 初始验证，直接从二分中间 commit 开始",
+    )
 
     args = parser.parse_args()
 

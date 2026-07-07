@@ -55,7 +55,7 @@ benchmarks:
 
 # 二分参数
 bisect_options:
-  skip_verify: false
+  skip_initial_verification: false  # true=确认good/bad边界可靠，直接从中间commit开始
   health_check_timeout: 300
   health_check_interval: 5
 

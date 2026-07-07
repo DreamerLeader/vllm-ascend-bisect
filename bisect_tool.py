@@ -135,6 +135,13 @@ class BisectTool:
         if not repo_path.startswith('/'):
             repo_path = str(self.config_dir / repo_path)
         return repo_path
+
+    def should_skip_initial_verification(self):
+        """Return whether to trust configured bisect bounds and start at midpoint."""
+        options = self.config.get('bisect_options', {})
+        if 'skip_initial_verification' in options:
+            return bool(options['skip_initial_verification'])
+        return bool(options.get('skip_verify', False))
     
     def start_agent_if_needed(self):
         """按运行模式检查Agent；单机模式无需Agent。"""
@@ -1050,7 +1057,7 @@ class BisectTool:
             self.cleanup()
             return
         
-        if not self.config['bisect_options']['skip_verify']:
+        if not self.should_skip_initial_verification():
             log.info("\n" + "="*60)
             log.info("Verifying GOOD commit...")
             log.info("="*60)
@@ -1066,6 +1073,10 @@ class BisectTool:
                 log.error("Bad commit test PASSED! No regression.")
                 self.cleanup()
                 return
+        else:
+            log.info("\n" + "="*60)
+            log.info("Skipping initial good/bad verification; starting bisect from midpoint")
+            log.info("="*60)
         
         log.info("\n" + "="*60)
         log.info("Starting BISECT...")

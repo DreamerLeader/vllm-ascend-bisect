@@ -237,13 +237,13 @@ aisbench performance \
 ## 示例4：跳过验证场景
 
 ### 场景描述
-已确认good/bad commit无误，跳过初始验证加速二分过程。
+已确认good/bad commit边界无误，跳过初始端点验证，第一轮直接测试二分中间commit。
 
 ### 配置修改
 
 ```yaml
 bisect_options:
-  skip_verify: true  # 跳过good/bad验证
+  skip_initial_verification: true  # 直接从中间commit开始
 ```
 
 ---

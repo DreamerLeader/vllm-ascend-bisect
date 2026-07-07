@@ -470,8 +470,9 @@ def main():
     parser.add_argument("--log-dir", default="bisect_logs", help="每个 commit 的日志目录")
     parser.add_argument("--github-repo", default="vllm-project/vllm-ascend", help="GitHub 仓库")
     parser.add_argument(
-        "--skip-verify", action="store_true",
-        help="跳过 good/bad 验证 (确认无误时使用, 更快)",
+        "--skip-verify", "--skip-initial-verification",
+        dest="skip_verify", action="store_true",
+        help="跳过 good/bad 初始验证，直接从二分中间 commit 开始",
     )
 
     args = parser.parse_args()
