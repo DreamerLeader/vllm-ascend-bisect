@@ -812,7 +812,7 @@ class BisectTool:
                         all_passed = False
                 else:
                     log.error(f"  ✗ Result file not found")
-                    log.error(f"    Expected: outputs/default/{时间}/results/vllm-api-stream-chat/*.json")
+                    log.error("    Expected: outputs/default/{timestamp}/results/vllm-api-stream-chat/*.json")
                     all_passed = False
                     
             except subprocess.TimeoutExpired:

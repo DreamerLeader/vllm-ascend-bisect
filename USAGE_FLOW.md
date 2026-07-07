@@ -182,7 +182,7 @@ python3 ../bisect_tool.py --config config_single_node.yaml
 ┌─────────────────────────────────────────────────────────┐
 │ 4. accuracy_check（精度验证）                             │
 │    └→ bash accuracy.sh                                   │
-│    └→ 自动查找：outputs/default/{时间}/.../*.json        │
+│    └→ 自动查找：outputs/default/{timestamp}/.../*.json   │
 │    └→ 提取accuracy字段                                    │
 │    └→ 校验：accuracy >= 0.95                              │
 │    └→ 保存日志：bisect_logs/benchmark_accuracy_*.log     │
